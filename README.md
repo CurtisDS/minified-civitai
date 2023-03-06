@@ -3,7 +3,7 @@ A python script that allows you to download and manage Civitai model pages as ei
 
 The basic usage is to call `get.py` and pass it Civitai model IDs (found in the URL of the model page). It will then download the data needed to recreate a minified version of the website. It also creates a cache file that stores all of the images as base64 strings to allow embedding of images into the html files. The cache file may get very large, I do not recommend trying to open it after you have downloaded a lot of images as it will probably crash your text editor.
 
-This is my personal script and was not created with the intent on publishing but after request I have shared it. It relies on Civitai not altering their website and may stop functioning at any time. **Use this script at your own risk, you bare all responsibility for using it.**
+This is my personal script and was not created with the intent on publishing but after request I have shared it. It relies on Civitai not altering their website and may stop functioning at any time. **Use this script at your own risk, you bear all responsibility for using it.**
 
 # Usage
 A recommended example using `4201` and `4384` as example model pages you would like to download (`-p` is used to output which model it is working on downloading):
