@@ -1,6 +1,8 @@
 import re
 import os
+import sys
 import json
+import time
 import shlex
 import base64
 import zipfile
@@ -8,13 +10,17 @@ import tempfile
 import argparse
 import requests
 import markdownify
+import urllib.parse
 from PIL import Image
 from io import BytesIO
 from datetime import datetime
 from bs4 import BeautifulSoup
 
+# get the start time
+start_time = time.time()
+
 # Declare variables
-review_limit = 35
+review_limit = 12
 comment_limit = 4
 file_name_max_size = 60
 
@@ -27,6 +33,8 @@ def get_folder(type):
 		folder = "models"
 	elif type.lower() == "lora":
 		folder = "lora"
+	elif type.lower() == "locon":
+		folder = "locon"
 	else:
 		folder = "unknownCivitai"
 	return folder
@@ -51,38 +59,20 @@ If no output flags are set it will default to create every file type. You are ab
 but using all of them is equivalent to using none of them.'
 
 parser = argparse.ArgumentParser(description=help_description, add_help=False, epilog=help_epilog, formatter_class=NewlineFormatter)
+parser.add_argument('-c', '--combine', type=str, default='merged.json', help='file path to existing merged JSON (defaults to merged.json)')
 parser.add_argument('-j', '--json', action='store_true', help='turn on JSON output flag')
 parser.add_argument('-h', '--html', action='store_true', help='turn on HTML output flag')
 parser.add_argument('-m', '--md', action='store_true', help='turn on Markdown output flag')
-parser.add_argument('-n', '--file_names', action='store_true', help='turn on "version files" list output flag (a file that will associate the civitai id to its model name hash and html file)')
+parser.add_argument('-l', '--md-legacy', action='store_true', help='if markdown output flag is on use legacy algorithm to generate the markdown')
+parser.add_argument('-b', '--no-base64-images', action='store_true', help='use urls instead of base64 strings for images')
+parser.add_argument('-n', '--file-names', action='store_true', help='turn on "version files" list output flag (a file that will associate the civitai id to its model name hash and html file)')
 parser.add_argument('-u', '--update', action='store_true', help='update models found in provided json files')
-parser.add_argument('-f', '--force_new_arguments', action='store_true', help='on top of the initial arguments ask the user for new arguments once started (allows you to use a bat file to set default arguments but still add more when running)')
+parser.add_argument('-f', '--force-new-arguments', action='store_true', help='on top of the initial arguments ask the user for new arguments once started (allows you to use a bat file to set default arguments but still add more when running)')
 parser.add_argument('-p', '--print', action='store_true', help='turn on flag to print to console all model names and keys when processing multiple models at once')
+parser.add_argument('-d', '--debug', action='store_true', help='turn on flag to print debug lines to console')
 parser.add_argument('-?', '--help', action='store_true', help='show this help message and exit')
 parser.add_argument('args', nargs='*', help='model numbers or file paths to json files that contain previously downloaded data. If not specified you will be asked for this at runtime')
 args = parser.parse_args()
-
-# Load the image cache from a file if it exists
-try:
-	with open('cache.json', 'r') as f:
-		image_cache = json.load(f)
-except FileNotFoundError:
-	image_cache = {}
-
-try:
-	with open('cache2.json', 'r') as f:
-		image_cache2 = json.load(f)
-except FileNotFoundError:
-	image_cache2 = {}
-
-image_cache_changed = False
-
-# Load the file names previously found from a file if it exists
-try:
-	with open('version_files.json', 'r') as f:
-		version_files = json.load(f)
-except FileNotFoundError:
-	version_files = {}
 
 if args.help:
 	# Show the help message and exit
@@ -105,28 +95,158 @@ if not args.args or args.force_new_arguments:
 debug_arguments = False
 
 if debug_arguments:
-	out = f"""args.help = {args.help}
-	args.json = {args.json}
-	args.html = {args.html}
-	args.md = {args.md}
-	args.update = {args.update}
-	args.print = {args.print}
-	args.force_new_arguments = {args.force_new_arguments}
-	args.args = {args.args}
+	out = f"""
+    args.combine = {args.combine}
+    args.help = {args.help}
+    args.json = {args.json}
+    args.html = {args.html}
+    args.md = {args.md}
+    args.md_legacy = {args.md_legacy}
+    args.no_base64_images = {args.no_base64_images}
+    args.file_names = {args.file_names}
+    args.update = {args.update}
+    args.print = {args.print}
+    args.debug = {args.debug}
+    args.force_new_arguments = {args.force_new_arguments}
+    args.args = {args.args}
 	"""
 	print(out)
 	exit()
 
-# Download an image and convert it to base64, unless it was previously already done so and saved in the image cache then just return the base64 stream
-def convert_image_to_base64(image_url):
-	global image_cache_changed
-	if image_url is None or image_url == "":
+"""
+# Load the image cache from a file if it exists
+try:
+	with open('cache.json', 'r') as f:
+		image_cache = json.load(f)
+	f.close()
+except FileNotFoundError:
+	image_cache = {}
+
+try:
+	with open('cache2.json', 'r') as f:
+		image_cache2 = json.load(f)
+	f.close()
+except FileNotFoundError:
+	image_cache2 = {}
+"""
+image_cache = {}
+image_cache2 = {}
+image_cache_changed = False
+
+# Load the file names previously found from a file if it exists
+
+if os.path.isfile('version_files.json'):
+	with open('version_files.json', 'r') as f:
+		version_files = json.load(f)
+	f.close()
+else:
+	version_files = {}
+
+# split a string into segments of strings and ints that will be used to sort something naturally
+def natural_order_number(s):
+	return [int(x) if x.isdigit() else x.lower() for x in re.split('(\d+)', s)]
+
+# Download an image and convert it to base64, unless it was previously already done so and saved in the image cache then just return the base64 stream or just the direct civitai url if no-base64-images is set
+def convert_image_to_base64(image_key):
+	if image_key is None or image_key == "":
 		return ""
 
+	image_url = img_url(image_key)
+	
+	if args.no_base64_images:
+		return image_url
+
+	if args.debug:
+		sys.stdout.write(f'Searching cache ({image_url})...')
+		sys.stdout.flush()
+	elif args.print:
+		sys.stdout.write(f'.')
+		sys.stdout.flush()
+
+	# Try to find and load the image from the image cache of files
+	cache_file = os.path.join('image_cache', image_key)
+	cache_exists = os.path.isfile(cache_file)
+	if cache_exists:
+		with open(cache_file, 'rb') as f:
+			image_data = f.read()
+		f.close()
+	else:
+		image_data = None
+
+	# If the URL is in the cache, return the value
+	if image_data is None:
+
+		# Image is not cached so attempt to fetch it from the website
+		if args.debug:
+			sys.stdout.write(' Downloading image...')
+			sys.stdout.flush()
+		try:
+			response = requests.get(image_url)
+			image_data = response.content
+		except Exception as e:
+			if args.debug:
+				print('ED!')
+				print(e)
+			elif args.print:
+				sys.stdout.write(f'!')
+				sys.stdout.flush()
+			return image_url
+
+	# Convert the image to base64
+	try:
+		image = Image.open(BytesIO(image_data))
+		base64_image = base64.b64encode(image_data).decode('utf-8')
+	except Image.UnidentifiedImageError:
+		if args.debug:
+			print('EI!')
+		elif args.print:
+			sys.stdout.write(f'!')
+			sys.stdout.flush()
+		return image_url
+
+	# Save the image to cache
+	try:
+		if image.format:
+			image_format = image.format
+		else:
+			image_format = "PNG"
+		if not cache_exists:
+			image.save(cache_file, format=image_format)
+	except Exception as e:
+		if args.debug:
+			print('ES!', image_format, e)
+		elif args.print:
+			sys.stdout.write(f'!')
+			sys.stdout.flush()
+
+	result = f"data:image/{image_format};base64,{base64_image}"
+	if args.debug:
+		print('!')
+	return result
+
+def convert_image_to_base64_deprecated(image):
+	global image_cache_changed
+
+	if image is None or image == "":
+		return ""
+
+	image_url = img_url(image)
+	
+	if args.no_base64_images:
+		return image_url
+
+	if args.debug:
+		sys.stdout.write(f'Searching cache ({image_url})...')
+		sys.stdout.flush()
+	elif args.print:
+		sys.stdout.write(f'.')
+		sys.stdout.flush()
 	cached_image = image_cache.get(image_url, None)
 
 	# If the URL is in the cache, return the value
 	if cached_image is not None:
+		if args.debug:
+			print('!')
 		return cached_image
 
 	# Check the secondary cache (which has a dictionary that points to a local path file)
@@ -142,13 +262,33 @@ def convert_image_to_base64(image_url):
 			result = f"data:image/{format};base64,{base64_image}"
 			image_cache[image_url] = result  # Add the URL and base64 to the cache
 			image_cache_changed = True
+			if args.debug:
+				print('!')
 			return result
 		except:
 			print("Failed to cache local image " + image_path)
 
 	# Both caches do not contain the image so attempt to fetch it from the website
-	response = requests.get(image_url)
-	image_data = response.content
+	if args.debug:
+		sys.stdout.write(' Downloading image...')
+		sys.stdout.flush()
+	try:
+		response = requests.get(image_url)
+		image_data = response.content
+	except Exception as e:
+		if args.debug:
+			print('ED!')
+			print(e)
+		elif args.print:
+			sys.stdout.write(f'!')
+			sys.stdout.flush()
+		try:
+			if image_url not in image_cache.keys():
+				image_cache[image_url] = None  # Add the URL with a None value to the cache
+				image_cache_changed = True
+		except Exception as ex:
+			print(ex)
+		return image_url
 	try:
 		image = Image.open(BytesIO(image_data))
 		format = "JPEG" if image.format == "JPEG" else "PNG"
@@ -156,71 +296,106 @@ def convert_image_to_base64(image_url):
 		result = f"data:image/{format};base64,{base64_image}"
 		image_cache[image_url] = result  # Add the URL and base64 to the cache
 		image_cache_changed = True
+		if args.debug:
+			print('!')
 		return result
 	except Image.UnidentifiedImageError:
+		if args.debug:
+			print('EI!')
+		elif args.print:
+			sys.stdout.write(f'!')
+			sys.stdout.flush()
 		if image_url not in image_cache.keys():
 			image_cache[image_url] = None  # Add the URL with a None value to the cache
 			image_cache_changed = True
 	return image_url
 
 def img_url(x):
-	return "https://imagecache.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/" + x + "/width=400"
+	return f"https://imagecache.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/{x}/width=400"
+
+def img_md_legacy(image):
+	# Return an empty string if the image object is None
+	if image is None:
+		return ""
+
+	out = [f"->![image]({convert_image_to_base64(image['url'])})<-\n"]
+	if image['meta'] is not None:
+		meta_tags = list(image['meta'].keys())
+		if meta_tags:
+			# Add the image meta data to the output string
+			meta_out = ["``` text\n"]
+			if "prompt" in meta_tags:
+				meta_out.append(f"{image['meta']['prompt']}\n")
+			if "negativePrompt" in meta_tags:
+				meta_out.append(f"Negative prompt: {image['meta']['negativePrompt']}\n")
+			for i, tag in enumerate(meta_tags):
+				if tag == "cfgScale":
+					# Add the cfgScale meta data to the output string
+					meta_out.append(f"CFG scale: {image['meta']['cfgScale']}, ")
+				elif tag != "prompt" and tag != "negativePrompt":
+					# Add the other meta data to the output string, convert the tag to Proper case
+					meta_out.append(re.sub(r'\b\w', lambda x: x.group(0).upper(), tag, count=1) + ": " + str(image['meta'][tag]) + ", ")
+			# Remove any trailing commas or whitespace
+			out.append("".join(meta_out).rstrip(", ") + "\n```\n")
+	return "".join(out)
 
 def img_md(image):
 	# Return an empty string if the image object is None
 	if image is None:
 		return ""
 
-	out = f"->![image]({img_url(image['url'])})<-\n"
+	out = ['<div style="display: inline-block; width: 410px; vertical-align: top; text-align: center; margin: 5px">']
+	out.append(f'<img style="width: 400px; margin:auto" src="{convert_image_to_base64(image["url"])}">')
+
 	if image['meta'] is not None:
 		meta_tags = list(image['meta'].keys())
 		if meta_tags:
 			# Add the image meta data to the output string
-			out += "``` text\n"
+			meta_out = [f"<details>\n<summary>Metadata</summary>\n\n``` text\n"]
 			if "prompt" in meta_tags:
-				out += f"{image['meta']['prompt']}\n"
+				meta_out.append(f"{image['meta']['prompt']}\n")
 			if "negativePrompt" in meta_tags:
-				out += f"Negative prompt: {image['meta']['negativePrompt']}\n"
+				meta_out.append(f"Negative prompt: {image['meta']['negativePrompt']}\n")
 			for i, tag in enumerate(meta_tags):
 				if tag == "cfgScale":
 					# Add the cfgScale meta data to the output string
-					out += f"CFG scale: {image['meta']['cfgScale']}, "
+					meta_out.append(f"CFG scale: {image['meta']['cfgScale']}, ")
 				elif tag != "prompt" and tag != "negativePrompt":
 					# Add the other meta data to the output string, convert the tag to Proper case
-					out += re.sub(r'\b\w', lambda x: x.group(0).upper(), tag, count=1) + ": " + str(image['meta'][tag]) + ", "
+					meta_out.append(re.sub(r'\b\w', lambda x: x.group(0).upper(), tag, count=1) + ": " + str(image['meta'][tag]) + ", ")
 			# Remove any trailing commas or whitespace
-			out = out.rstrip(", ")
-			out += "\n```\n"
-	return out
+			out.append("".join(meta_out).rstrip(", ") + "\n```\n</details>\n")
+	out.append('</div>')
+	return "".join(out)
 	
 def img_html(image):
 	# Return an empty string if the image object is None
 	if image is None:
 		return ""
 
-	out = f'<div class="img-container"><img src="{convert_image_to_base64(img_url(image["url"]))}" />'
+	out = [f'<div class="img-container"><img src="{convert_image_to_base64(image["url"])}" />']
 	if image['meta'] is not None:
 		meta_tags = list(image['meta'].keys())
 		if meta_tags:
 			# Add the image meta data to the output string
-			out += '<div class="img-meta-ico" title="Copy Metadata"></div><textarea class="img-meta">'
-			meta_out = ""
+			out.append('<div class="img-meta-ico" title="Copy Metadata"></div><textarea class="img-meta">')
+			meta_out = []
 			if "prompt" in meta_tags:
-				meta_out += f"{image['meta']['prompt']}\n"
+				meta_out.append(f"{image['meta']['prompt']}\n")
 			if "negativePrompt" in meta_tags:
-				meta_out += f"Negative prompt: {image['meta']['negativePrompt']}\n"
+				meta_out.append(f"Negative prompt: {image['meta']['negativePrompt']}\n")
 			for i, tag in enumerate(meta_tags):
 				if tag == "cfgScale":
 					# Add the cfgScale meta data to the output string
-					meta_out += f"CFG scale: {image['meta']['cfgScale']}, "
+					meta_out.append(f"CFG scale: {image['meta']['cfgScale']}, ")
 				elif tag != "prompt" and tag != "negativePrompt":
 					# Add the other meta data to the output string, convert the tag to Proper case
-					meta_out += re.sub(r'\b\w', lambda x: x.group(0).upper(), tag, count=1) + ": " + str(image['meta'][tag]) + ", "
+					meta_out.append(re.sub(r'\b\w', lambda x: x.group(0).upper(), tag, count=1) + ": " + str(image['meta'][tag]) + ", ")
 			# Remove any trailing commas or whitespace
-			meta_out = meta_out.rstrip(", ")
-			out += f"{meta_out}</textarea>"
-	out += "</div>\n"
-	return out
+			meta_out_string = "".join(meta_out).rstrip(", ")
+			out.append(f"{meta_out_string}</textarea>")
+	out.append("</div>\n")
+	return "".join(out)
 
 def generate_stars(rating, max_rating):
 	# Initialize the output string with empty stars
@@ -287,115 +462,229 @@ def html_to_markdown(HTML):
 		HTML = markdownify.markdownify(HTML).strip()
 	return HTML
 
-def get_file_hash(file):
+def get_file_hash(file, hash_type = "AutoV1"):
 	if file['hashes'] and file['hashes'] is not None and len(file['hashes']) > 0:
 		for hash in file['hashes']:
-			if hash['type'] and hash['type'] is not None and hash['type'] == "AutoV1":
+			if hash['type'] and hash['type'] is not None and hash['type'].lower() == hash_type.lower():
 				return hash['hash']
 	return None
 
-def generate_md_file(data, reviews):
-	out = ""
+def get_best_main_image(model_versions):
+	second_best_image = None
+	for model_version in model_versions:
+		image = model_version["images"][0].get("image", model_version["images"][0])
+		if not second_best_image:
+			second_best_image = image
+		if not model_version['name'].endswith(('inpainting', 'instruct-pix2pix')):
+			return image
+	return second_best_image
+
+def generate_md_file_legacy(data, reviews):
+	model_versions = sorted(data['modelVersions'], key=lambda x: x['createdAt'], reverse=True)
+	out = []
 	# Add the favorite and rating count to the output string
-	out += f"==🤍 {data['rank']['favoriteCountAllTime']}== =={generate_stars(data['rank']['ratingAllTime'], 5)} {data['rank']['ratingCountAllTime']}==\n"
+	out.append(f"==🤍 {data['rank']['favoriteCountAllTime']}== =={generate_stars(data['rank']['ratingAllTime'], 5)} {data['rank']['ratingCountAllTime']}==\n")
 	# Add the model name as a header to the output string
-	out += f"# {data['name']}\n"
+	out.append(f"# {data['name']}\n")
 	# Add the model type to the output string
-	out += f"->`{data['type']}`->\n"
+	out.append(f"->`{data['type']}`->\n")
 	# Add the first image to the output string
-	out += img_md(data['modelVersions'][0]['images'][0].get('image', data['modelVersions'][0]['images'][0]))
+	out.append(img_md_legacy(get_best_main_image(model_versions)))
 	# Remove HTML tags from the description and add it to the output string
-	out += f"{html_to_markdown(data['description'])}\n\n"
+	out.append(f"{html_to_markdown(data['description'])}\n\n")
 	# Loop through the model versions
-	for i in range(len(data['modelVersions'])):
-		# Get the current model version
-		model_version = data['modelVersions'][i]
+	for model_version in model_versions:
 		# Add a section heading for the model version
-		out += "!!! info\n"
+		out.append("!!! info\n")
 		# Add a link to download the model version to the output string
 		# Loop through the files for this model
-		for j in range(len(model_version['files'])):
-			download_url = f"https://civitai.com/api/download/models/{model_version['id']}?type={model_version['files'][j]['type']}&format={model_version['files'][j]['format']}"
+		for j, file in enumerate(model_version['files']):
+			download_url = f"https://civitai.com/api/download/models/{model_version['id']}?type={urllib.parse.quote(file['type'])}&format={urllib.parse.quote(file['format'])}"
 			# Add any other files to the output
 			if j == 0:
-				out += f"    **[Download ({format_kb(model_version['files'][j]['sizeKB'])})]({download_url})**"
-			elif model_version['files'][j]['type'] == 'Model' or model_version['files'][j]['type'] == 'Pruned Model':
+				out.append(f"    **[Download ({format_kb(file['sizeKB'])})]({download_url})**")
+			elif file['type'] == 'Model' or file['type'] == 'Pruned Model':
 				pruned = ""
-				if model_version['files'][j]['type'] == 'Pruned Model':
+				if file['type'] == 'Pruned Model':
 					pruned = " Pruned"
-				out += f"** | [{model_version['files'][j]['format']}{pruned}]({download_url})**"
+				out.append(f"** | [{file['format']}{pruned}]({download_url})**")
 			else:
-				out += f"** | [{model_version['files'][j]['type']}]({download_url})**"
+				out.append(f"** | [{file['type']}]({download_url})**")
 
-		out += "\n"
+		out.append(f"\n\n#### Version {model_version['name']}\n")
 		# Add the model version name and other data to the output string
-		out += f"Version|{model_version['name']}\n"
-		out += "-|-\n"
-		out += f"Rating|{generate_stars(model_version['rank']['ratingAllTime'], 5)} ({model_version['rank']['ratingCountAllTime']})\n"
-		out += f"Downloads|{model_version['rank']['downloadCountAllTime']}\n"
-		out += f"Uploaded|{format_date(model_version['createdAt'])}\n"
-		if model_version['trainedWords'] and len(model_version['trainedWords']) > 0:
+		out.append(f"Version|{model_version['name']}\n")
+		out.append("-|-\n")
+		out.append(f"Rating|{generate_stars(model_version['rank']['ratingAllTime'], 5)} ({model_version['rank']['ratingCountAllTime']})\n")
+		out.append(f"Downloads|{model_version['rank']['downloadCountAllTime']}\n")
+		out.append(f"Uploaded|{format_date(model_version['createdAt'])}\n")
+		if model_version['trainedWords']:
 			# Concatenate all trained words into a string and wrap them with tilda (`) characters separating with commas
-			out += f"Trigger Words| `{'`, `'.join(model_version['trainedWords'])}`\n"
+			out.append(f"Trigger Words| `{'`, `'.join(model_version['trainedWords'])}`\n")
 		if model_version['baseModel'] and model_version['baseModel'] is not None:
-			out += f"Base Model|{model_version['baseModel']}\n"
-		out += f"Format|{model_version['files'][0]['format']}\n"
+			out.append(f"Base Model|{model_version['baseModel']}\n")
+		out.append(f"Format|{model_version['files'][0]['format']}\n")
 		if model_version['description']:
 			# Convert the description to markdown and check again to see if the new string is empty before adding to the output
 			description = html_to_markdown(model_version['description'])
 			if description and description != "":
-				out += "!!! note About this version\n"
-				out += f"    {description}\n"
-		out += "\n"
+				out.append("!!! note About this version\n")
+				description_string = description.replace('\n', '\n    ')
+				out.append(f"    {description_string}\n")
+		out.append("\n")
 		# Loop through the images for this version
-		for j in range(len(model_version['images'])):
-			# If this is the first model version and the first image we already used it at the top, so skip it
-			if i == 0 and j == 0:
-				continue
+		for j, model_version_image in enumerate(model_version['images']):
 			# Add the current image to the output string
-			out += img_md(model_version['images'][j].get('image', model_version['images'][j]))
+			out.append(img_md_legacy(model_version_image.get('image', model_version_image)))
 		# Add a horizontal rule to separate the model versions from the rest of the document
-		out += "***\n"
-		# Add a section to the markdown doc for reviews, if there are any
-		if len(reviews) > 0:
-			out += "#### Discussion\n\n"
-			# Iterate through the reviews
-			for i in range(len(reviews)):
-				review = reviews[i]
-				# Only include the review/comment if it has an image or text
-				if ("text" not in review or review["text"] is None) and ("content" not in review or review["content"] is None) and ("images" not in review or len(review["images"]) == 0):
-					continue
-				# Add the username as a subheading
-				out += f"###### {review['user']['username']}\n"
-				if "rating" in review and review["rating"] is not None:
-					out += f'-->=={generate_stars(review["rating"], 5)}==-->\n'
-				# Add the review text, if it exists
-				if "text" in review and review["text"] is not None:
-					out += "!!! note\n"
-					out += f"    {html_to_markdown(review['text'])}\n"
-				elif "content" in review and review["content"] is not None:
-					out += "!!! note\n"
-					out += f"    {html_to_markdown(review['content'])}\n"
-				# Add the images for the review if they exist (it might be just a comment)
-				if "images" in review and review["images"] is not None:
-					for j in range(len(review["images"])):
-						if review["images"][j].get("skip", False):
-							continue
-						out += img_md(review["images"][j])
-				# Add a horizontal rule to separate the reviews
-				out += "***\n"
+		out.append("***\n")
+	# Add a section to the markdown doc for reviews, if there are any
+	if reviews:
+		out.append("#### Discussion\n\n")
+		# Iterate through the reviews
+		for review in reviews:
+			# Only include the review/comment if it has an image or text
+			if ("text" not in review or review["text"] is None) and ("content" not in review or review["content"] is None) and ("images" not in review or len(review["images"]) == 0):
+				continue
+			# Add the username as a subheading
+			out.append(f"###### {review['user']['username']}\n")
+			if "rating" in review and review["rating"] is not None:
+				out.append(f'->=={generate_stars(review["rating"], 5)}==->\n')
+			# Add the review text, if it exists
+			review_text_string = None
+			if "text" in review and review["text"] is not None:
+				review_text_string = review['text']
+			elif "content" in review and review["content"] is not None:
+				review_text_string = review['content']
+			if review_text_string:
+				review_text_string = html_to_markdown(review_text_string).strip()
+				if review_text_string != "":
+					review_text_string = review_text_string.replace('\n', '\n    ')
+					out.append("!!! note\n")
+					out.append(f"    {review_text_string}\n")
+			# Add the images for the review if they exist (it might be just a comment)
+			if "images" in review and review["images"] is not None:
+				for review_image in review["images"]:
+					if review_image.get("skip", False):
+						continue
+					out.append(img_md_legacy(review_image))
+			# Add a horizontal rule to separate the reviews
+			out.append("***\n")
 	# Include these links just to have handy, they will not appear in the markdown preview because their hypertext is empty
-	out += "->[​](https://rentry.org/)[​](https://ghostarchive.org/)<-\n"
+	out.append("->[​](https://rentry.org/)[​](https://ghostarchive.org/)<-\n")
 	# Add a section for the source and archive links, hide the archive link by default. Remove the wrapping [​]() to make visible
-	out += "-> *[source](https://civitai.com/models/{data['id']})*[​]( | *[archive](xxxxx)*) <-\n"
-	return out
+	out.append(f"-> *[source](https://civitai.com/models/{data['id']})*[​]( | *[archive](xxxxx)*) <-\n")
+	return "".join(out)
+
+
+def generate_md_file(data, reviews):
+	model_versions = sorted(data['modelVersions'], key=lambda x: x['createdAt'], reverse=True)
+	out = []
+	# Add the favorite, rating, and type count to the output string
+	out.append(f"<span style='background:#eee'>🤍 {data['rank']['favoriteCountAllTime']}</span> <span style='background:#eee'>{generate_stars(data['rank']['ratingAllTime'], 5)} {data['rank']['ratingCountAllTime']}</span> <span style='margin-right: 7px; float: right; background: rgb(231, 245, 255); color: rgb(34, 139, 230); padding: 5px; font-weight: bold; border-radius: 5px;'>{data['type']}</span>\n")
+	# Add the model name as a header to the output string
+	out.append(f"#  <div style='text-align: center'>{data['name']}</div>\n")
+	# Add the first image to the output string
+	out.append(f"<div style='text-align: center'>\n{img_md(get_best_main_image(model_versions))}\n</div>\n")
+	# Remove HTML tags from the description and add it to the output string
+	out.append(f"{html_to_markdown(data['description'])}\n\n")
+	first_version = True
+	trigger_words_style = "background: rgba(243, 240, 255, 1); color: #7950f2; border-radius: 5px; padding: 3px 8px; white-space: nowrap;"
+	out.append(f"## Versions\n")
+	# Loop through the model versions
+	for model_version in model_versions:
+		# Add a section heading for the model version
+		out.append(f"<details{' open' if first_version else ''}>\n<summary>{model_version['name']}</summary>\n\n")
+		out.append(f"<div style='background: rgb(231, 245, 255); padding: 5px 15px;'>\n\n")
+		# Add a link to download the model version to the output string
+		# Loop through the files for this model
+		for j, file in enumerate(model_version['files']):
+			download_url = f"https://civitai.com/api/download/models/{model_version['id']}?type={urllib.parse.quote(file['type'])}&format={urllib.parse.quote(file['format'])}"
+			# Add any other files to the output
+			if j == 0:
+				out.append(f"[**Download ({format_kb(file['sizeKB'])})**]({download_url})")
+			elif file['type'] == 'Model' or file['type'] == 'Pruned Model':
+				pruned = ""
+				if file['type'] == 'Pruned Model':
+					pruned = " Pruned"
+				out.append(f" **|** [**{file['format']}{pruned}**]({download_url})")
+			else:
+				out.append(f" **|** [**{file['type']}**]({download_url})")
+
+		out.append(f"\n\n</div>\n\n")
+		# Add the model version name and other data to the output string
+		out.append(f"Version|{model_version['name']}\n")
+		out.append("-|-\n")
+		out.append(f"Rating|{generate_stars(model_version['rank']['ratingAllTime'], 5)} ({model_version['rank']['ratingCountAllTime']})\n")
+		out.append(f"Downloads|{model_version['rank']['downloadCountAllTime']}\n")
+		out.append(f"Uploaded|{format_date(model_version['createdAt'])}\n")
+		if model_version['trainedWords']:
+			# Concatenate all trained words into a string and wrap them with tilda (`) characters separating with commas
+			trigger_words_string = f"`</span> <span style='{trigger_words_style}'>`".join(model_version['trainedWords'])
+			out.append(f"Trigger Words| <span style='{trigger_words_style}'>`{trigger_words_string}`</span>\n")
+		if model_version['baseModel'] and model_version['baseModel'] is not None:
+			out.append(f"Base Model|{model_version['baseModel']}\n")
+		out.append(f"Format|{model_version['files'][0]['format']}\n\n")
+		if model_version['description']:
+			# Convert the description to markdown and check again to see if the new string is empty before adding to the output
+			description = html_to_markdown(model_version['description'])
+			if description and description != "":
+				out.append(f"<details open>\n<summary>About this version</summary>\n\n")
+				out.append(f"{description}\n")
+				out.append(f"\n</details>\n")
+		out.append(f"\n")
+		# Loop through the images for this version
+		for j, model_version_image in enumerate(model_version['images']):
+			# Add the current image to the output string
+			out.append(f"{img_md(model_version_image.get('image', model_version_image))}\n\n")
+		# Add a horizontal rule to separate the model versions from the rest of the document
+		out.append(f"\n</details>\n\n***\n")
+		first_version = False
+	# Add a section to the markdown doc for reviews, if there are any
+	masonry_style = "display: grid; align-items: flex-start; align-content: stretch; gap: 1em; max-width: 100%; overflow: hidden; justify-content: center; grid-template-columns: repeat(auto-fill, minmax(420px, 1fr)); grid-template-rows: masonry;"
+	if reviews:
+		out.append(f"## Discussion\n\n<div style='{masonry_style}'>\n\n")
+		review_index = 0
+		# Iterate through the reviews
+		for review in reviews:
+			review_index += 1
+			# Only include the review/comment if it has an image or text
+			if ("text" not in review or review["text"] is None) and ("content" not in review or review["content"] is None) and ("images" not in review or len(review["images"]) == 0):
+				continue
+			# Add the username as a subheading
+			if review_index % 2 == 0:
+				review_color = "#c5dbf2"
+			else:
+				review_color = "#dce7f2"
+			out.append(f"<div style='vertical-align: top; display: inline-block; width: 440px; background: {review_color}; padding: 10px; margin: 10px; border-radius: 5px;'>\n\n")
+			out.append(f"###### **{review['user']['username']}** ")
+			if "rating" in review and review["rating"] is not None:
+				out.append(f'<span style="float: right">{generate_stars(review["rating"], 5)}</span>')
+			out.append(f"\n\n")
+			# Add the review text, if it exists
+			if "text" in review and review["text"] is not None:
+				out.append(f"{html_to_markdown(review['text'])}\n")
+			elif "content" in review and review["content"] is not None:
+				out.append(f"{html_to_markdown(review['content'])}\n")
+			# Add the images for the review if they exist (it might be just a comment)
+			if "images" in review and review["images"] is not None:
+				for review_image in review["images"]:
+					if review_image.get("skip", False):
+						continue
+					out.append(f"{img_md(review_image)}\n")
+			# Add a horizontal rule to separate the reviews
+			out.append(f"</div>\n")
+		out.append(f"</div>\n\n***\n")
+	# Add a section for the source
+	out.append(f"<div style='text-align: center'>\n\n[*source*](https://civitai.com/models/{data['id']})\n</div>\n")
+	return "".join(out)
 	
 def generate_html_file(data, reviews):
-	out = f'<!DOCTYPE html>\n<html>\n<head>\n'
-	out += f'<title>{data["name"]}</title>\n'
-	out += f'<meta http-equiv="content-type" content="text/html; charset=UTF-8" />\n'
-	out += f'<meta name="viewport" content="width=device-width, initial-scale=1" />\n'
-	out += '''<style>
+	out = [f'<!DOCTYPE html>\n<html>\n<head>\n']
+	out.append(f'<title>{data["name"]}</title>\n')
+	out.append(f'<meta http-equiv="content-type" content="text/html; charset=UTF-8" />\n')
+	out.append(f'<meta name="viewport" content="width=device-width, initial-scale=1" />\n')
+	out.append('''<style>
 	a {
 		color: #1564df;
 	}
@@ -577,6 +866,9 @@ def generate_html_file(data, reviews):
 		padding: 3px 8px;
 		white-space: nowrap;
 		cursor: pointer;
+	}
+	.tag-copy-ico {
+		pointer-events: none;
 	}
 	.tag-container {
 		display: flex;
@@ -760,76 +1052,85 @@ def generate_html_file(data, reviews):
 		object-fit: contain;
 	}
 	</style>
-	'''
-	out += f'</head>\n<body>\n<div class="page-container"><div class="page-heading">'
-	out += f'<div class="likes-and-ranks"><span>🤍 {data["rank"]["favoriteCountAllTime"]}</span><span>{generate_stars(data["rank"]["ratingAllTime"], 5)} {data["rank"]["ratingCountAllTime"]}</span></div>\n'
-	out += f'<div class="type">{data["type"]}</div>\n'
-	out += f'<h1>{data["name"]}</h1></div>\n'
-	out += f'<div class="img-set-container">'
-	out += img_html(data["modelVersions"][0]["images"][0].get("image", data["modelVersions"][0]["images"][0]))
-	out += f'</div>\n'
-	out += f'<div class="description">{data["description"]}</div>\n\n'
-	out += '<div class="version-tabs">\n<h1>Versions:</h1>'
-	versions_out = ''
-	for i, model_version in enumerate(data["modelVersions"]):
-		out += f'<button version-id="model-version-{model_version["id"]}"' + ( ' class="active"' if i == 0 else "" ) + f'>{model_version["name"]}</button>\n'
-		versions_out += f'<div id="model-version-{model_version["id"]}" class="version-container{ " active" if i == 0 else "" }">\n'
-		versions_out += f'<ul class="download">\n'
-		for j in range(len(model_version["files"])):
-			hash = get_file_hash(model_version["files"][j])
-			hash_tag = ""
+	''')
+	model_versions = sorted(data['modelVersions'], key=lambda x: x['createdAt'], reverse=True)
+	out.append(f'</head>\n<body>\n<div class="page-container"><div class="page-heading">')
+	out.append(f'<div class="likes-and-ranks"><span>🤍 {data["rank"]["favoriteCountAllTime"]}</span><span>{generate_stars(data["rank"]["ratingAllTime"], 5)} {data["rank"]["ratingCountAllTime"]}</span></div>\n')
+	out.append(f'<div class="type">{data["type"]}</div>\n')
+	out.append(f'<h1>{data["name"]}</h1></div>\n')
+	out.append(f'<div class="img-set-container">')
+	out.append(img_html(get_best_main_image(model_versions)))
+	out.append(f'</div>\n')
+	out.append(f'<div class="description">{data["description"]}</div>\n\n')
+	out.append('<div class="version-tabs">\n<h1>Versions:</h1>')
+	versions_out = []
+	for i, model_version in enumerate(model_versions):
+		out.append(f'<button version-id="model-version-{model_version["id"]}"' + ( ' class="active"' if i == 0 else "" ) + f'>{model_version["name"]}</button>\n')
+		versions_out.append(f'<div id="model-version-{model_version["id"]}" class="version-container{ " active" if i == 0 else "" }">\n')
+		versions_out.append(f'<ul class="download">\n')
+		for j, file in enumerate(model_version["files"]):
+			hash_av1 = get_file_hash(file)
+			hash_av2 = get_file_hash(file, "AutoV2")
+			hash_sha256 = get_file_hash(file, "SHA256")
+			if hash_av2 is None and hash_sha256 is not None:
+				hash_av2 = hash_sha256[:10]
+			hash = hash_av2 if hash_av2 is not None else hash_av1
+			hash_tag = []
 			if hash is not None:
-				hash_tag = f'title="Hash: {hash}" '
+				hash_tag.append(f'title="Hash: {hash}"')
+			if hash_av1 is not None:
+				hash_tag.append(f'autoV1="{hash_av1}"')
+			if hash_av2 is not None:
+				hash_tag.append(f'autoV2="{hash_av2}"')
+			if hash_sha256 is not None:
+				hash_tag.append(f'sha256="{hash_sha256}"')
 			if j == 0:
 				tag = f'Download ({format_kb(model_version["files"][0]["sizeKB"])})'
 			elif model_version['files'][j]['type'] == 'Model' or model_version['files'][j]['type'] == 'Pruned Model':
 				pruned = ""
 				if model_version['files'][j]['type'] == 'Pruned Model':
 					pruned = " Pruned"
-				tag = model_version["files"][j]["format"] + pruned
+				tag = file["format"] + pruned
 			else:
-				tag = model_version["files"][j]["type"]
-			download_url = f'https://civitai.com/api/download/models/{model_version["id"]}?type={model_version["files"][j]["type"]}&format={model_version["files"][j]["format"]}'
-			versions_out += f'<li><a href="{download_url}" {hash_tag} target="_blank" rel="noopener noreferrer">{tag}</a></li>\n'
-		versions_out += f'</ul>\n'
+				tag = file["type"]
+			download_url = f'https://civitai.com/api/download/models/{model_version["id"]}?type={file["type"]}&format={file["format"]}'
+			versions_out.append(f'<li><a href="{download_url}" {" ".join(hash_tag)} target="_blank" rel="noopener noreferrer">{tag}</a></li>\n')
+		versions_out.append(f'</ul>\n')
 		
-		versions_out += f'<div class="version-description"><table>\n'
-		versions_out += f'<tr><th>Rating</th><td>{generate_stars(model_version["rank"]["ratingAllTime"], 5)} ({model_version["rank"]["ratingCountAllTime"]})</td></tr>\n'
-		versions_out += f'<tr><th>Downloads</th><td>{model_version["rank"]["downloadCountAllTime"]}</td></tr>\n'
-		versions_out += f'<tr><th>Uploaded</th><td>{format_date(model_version["createdAt"])}</td></tr>\n'
-		if model_version["trainedWords"] and len(model_version["trainedWords"]) > 0:
-			versions_out += '<tr><th>Trigger Words</th><td><div class="tag-container">'
+		versions_out.append(f'<div class="version-description"><table>\n')
+		versions_out.append(f'<tr><th>Rating</th><td>{generate_stars(model_version["rank"]["ratingAllTime"], 5)} ({model_version["rank"]["ratingCountAllTime"]})</td></tr>\n')
+		versions_out.append(f'<tr><th>Downloads</th><td>{model_version["rank"]["downloadCountAllTime"]}</td></tr>\n')
+		versions_out.append(f'<tr><th>Uploaded</th><td>{format_date(model_version["createdAt"])}</td></tr>\n')
+		if model_version["trainedWords"]:
+			versions_out.append('<tr><th>Trigger Words</th><td><div class="tag-container">')
 			for word in model_version["trainedWords"]:
-				versions_out += '<span class="tag">'
-				versions_out += word
-				versions_out += ' <span class="tag-copy-ico"><svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" fill="none" stroke-linecap="round" stroke-linejoin="round"><path stroke="none" d="M0 0h24v24H0z" fill="none"></path><rect x="8" y="8" width="12" height="12" rx="2"></rect><path d="M16 8v-2a2 2 0 0 0 -2 -2h-8a2 2 0 0 0 -2 2v8a2 2 0 0 0 2 2h2"></path></svg></span>'
-				versions_out += '</span>'
-			versions_out += '</div></td></tr>\n'
+				versions_out.append('<span class="tag">')
+				versions_out.append(word)
+				versions_out.append(' <span class="tag-copy-ico"><svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" fill="none" stroke-linecap="round" stroke-linejoin="round"><path stroke="none" d="M0 0h24v24H0z" fill="none"></path><rect x="8" y="8" width="12" height="12" rx="2"></rect><path d="M16 8v-2a2 2 0 0 0 -2 -2h-8a2 2 0 0 0 -2 2v8a2 2 0 0 0 2 2h2"></path></svg></span>')
+				versions_out.append('</span>')
+			versions_out.append('</div></td></tr>\n')
 		if model_version["baseModel"] and model_version["baseModel"] is not None:
-			versions_out += f'<tr><th>Base Model</th><td>{model_version["baseModel"]}</td></tr>\n'
-		versions_out += f'<tr><th>Format</th><td>{model_version["files"][0]["format"]}</td></tr>\n'
-		versions_out += f'</table>\n'
+			versions_out.append(f'<tr><th>Base Model</th><td>{model_version["baseModel"]}</td></tr>\n')
+		versions_out.append(f'<tr><th>Format</th><td>{model_version["files"][0]["format"]}</td></tr>\n')
+		versions_out.append(f'</table>\n')
 		if model_version["description"] and model_version["description"] != "":
-			versions_out += f'<div class="version-description-text">{model_version["description"]}</div>\n'
-		versions_out += '</div>'
+			versions_out.append(f'<div class="version-description-text">{model_version["description"]}</div>\n')
+		versions_out.append('</div>')
 
-		versions_out += f'<div class="version-img-set"><div class="img-set-container">'
+		versions_out.append(f'<div class="version-img-set"><div class="img-set-container">')
 		for j, image in enumerate(model_version["images"]):
-			if i == 0 and j == 0:
-				continue
-			versions_out += img_html(image.get("image", image))
-		versions_out += f'</div></div>\n'
+			versions_out.append(img_html(image.get("image", image)))
+		versions_out.append(f'</div></div>\n')
 
-		versions_out += f'\n</div>'
-	out += '</div>\n'
-	out += versions_out
+		versions_out.append(f'\n</div>')
+	out.append('</div>\n')
+	out.append(''.join(versions_out))
 
 	# Add a section to the markdown doc for reviews, if there are any
-	if len(reviews) > 0:
-		out += f'<h4>Discussion</h4>\n<div class="reviews">'
+	if reviews:
+		out.append(f'<h4>Discussion</h4>\n<div class="reviews">')
 		# Iterate through the reviews
-		for i in range(len(reviews)):
-			review = reviews[i]
+		for review in reviews:
 			# Only include the review/comment if it has an image or text
 			if ("text" not in review or review["text"] is None) and ("content" not in review or review["content"] is None) and ("images" not in review or len(review["images"]) == 0):
 				continue
@@ -838,31 +1139,31 @@ def generate_html_file(data, reviews):
 			# Convert the datetime object to a timestamp (integer)
 			timestamp = date.timestamp()
 			# Add the username as a subheading
-			out += f'<div class="comment" style="order: {int(timestamp)*-1}"><div class="comment-heading"><h5>{review["user"]["username"]}</h5>\n'
+			out.append(f'<div class="comment" style="order: {int(timestamp)*-1}"><div class="comment-heading"><h5>{review["user"]["username"]}</h5>\n')
 			if "rating" in review and review["rating"] is not None:
-				out += f'<div class="comment-rating">{generate_stars(review["rating"], 5)}</div>'
-			out += f'</div>\n'
+				out.append(f'<div class="comment-rating">{generate_stars(review["rating"], 5)}</div>')
+			out.append(f'</div>\n')
 			# Add the review text, if it exists
 			if "text" in review and review["text"] is not None:
-				out += f'<div class="comment-text">{review["text"]}</div>\n'
+				out.append(f'<div class="comment-text">{review["text"]}</div>\n')
 			elif "content" in review and review["content"] is not None:
-				out += f'<div class="comment-text">{review["content"]}</div>\n'
+				out.append(f'<div class="comment-text">{review["content"]}</div>\n')
 			# Add the images for the review if they exist (it might be just a comment)
 			if "images" in review and review["images"] is not None and len(review["images"]) > 0:
-				out += f'<div class="img-set-container">'
-				for j in range(len(review["images"])):
-					if review["images"][j].get("skip", False):
+				out.append(f'<div class="img-set-container">')
+				for review_image in review["images"]:
+					if review_image.get("skip", False):
 						continue
-					out += img_html(review["images"][j])
-				out += f'</div>'
-			out += "</div>\n"
-		out += "</div>\n"
+					out.append(img_html(review_image))
+				out.append(f'</div>')
+			out.append("</div>\n")
+		out.append("</div>\n")
 	# Include these links just to have handy, they will not appear in the markdown preview because their hypertext is empty
-	out += "<!-- https://rentry.org/ https://ghostarchive.org/ -->"
+	out.append("<!-- https://rentry.org/ https://ghostarchive.org/ -->")
 	# Add a section for the source and archive links, hide the archive link by default. Remove the wrapping [​]() to make visible
-	out += f'<div class="source"><a href="https://civitai.com/models/{data["id"]}" target="_blank" rel="noopener noreferrer">Source</a></div>\n'
-	out += "</div>\n"
-	out += """<script>
+	out.append(f'<div class="source"><a href="https://civitai.com/models/{data["id"]}" target="_blank" rel="noopener noreferrer">Source</a> | <a href="https://civitai.com/user/{data["user"]["username"]}" target="_blank" rel="noopener noreferrer">Author</a></div>\n')
+	out.append("</div>\n")
+	out.append("""<script>
 	const images = document.querySelectorAll(".img-container img");
 	const overlay = document.createElement("div");
 	overlay.setAttribute("id", "overlay");
@@ -921,37 +1222,37 @@ def generate_html_file(data, reviews):
 		}
 	});
 	</script>
-	"""
+	""")
 	# Convert the dictionary to a JSON string
-	json_data = json.dumps(rebuildSourceJSON(data, reviews), indent=2)
-	out += f'<script type="application/json">{json_data}</script>'
-	out += "</body>\n</html>"
-	return out
+	json_data = json.dumps(rebuildSourceJSON(data, reviews))
+	out.append(f'<script type="application/json">{json_data}</script>')
+	out.append("</body>\n</html>")
+	return "".join(out)
 
 def getPageDataFromModelData(modelData):
 	# Get the main page json data
 	pageData = modelData["pageData"]
 
-	# get the relavent data from json
+	# get the relevant data from json
 	return pageData["props"]["pageProps"]["trpcState"]["json"]["queries"][0]["state"]["data"]
 
 def getReviewsFromModelData(modelData):
 	# Get the main reviews json data
 	reviewsJson = modelData["reviewData"]
 
-	# hold the relavent review data
+	# hold the relevant review data
 	reviews = []
 
 	# Loop through the JSON array
-	for i in range(len(reviewsJson)):
+	for reviewsJson_item in reviewsJson:
 		# Get the reviews from the current object (Doing it this way incase more than one array object has reviews in it)
-		reviewsTemp = reviewsJson[i].get('result', {}).get('data', {}).get('json', {}).get('reviews', None)
+		reviewsTemp = reviewsJson_item.get('result', {}).get('data', {}).get('json', {}).get('reviews', None)
 		if reviewsTemp:
 			# Concatenate the reviews onto the main reviews array
 			reviews += reviewsTemp
 		else:
 			# Check for comments without images (Doing it this way incase more than one array object has comments in it)
-			commentsTemp = reviewsJson[i].get('result', {}).get("data", {}).get("json", {}).get("comments", [])
+			commentsTemp = reviewsJson_item.get('result', {}).get("data", {}).get("json", {}).get("comments", [])
 			if commentsTemp:
 				# Concatenate the comments onto the main reviews array
 				reviews += commentsTemp
@@ -1027,67 +1328,91 @@ def generate_version_files_array(data):
 	sanitized_name = sanitize_filename(data['name'], file_name_max_size)
 	html = f"{sanitized_name}_({data['id']}).html"
 	folder_name = get_folder(data['type'])
-	
 	for i, model_version in enumerate(data["modelVersions"]):
 		update_version_files = False
-		files = []
+		files = set()
 		hashes = []
-		version_names = []
+		version_names = set()
 		id = str(model_version['id'])
 		sanitized_version_name = sanitize_filename(model_version['name'], file_name_max_size)
-		for j in range(len(model_version["files"])):
-			file_name = model_version["files"][j]["name"]
-			file_type = model_version['files'][j]['type']
-			file_format = model_version['files'][j]['format']
+		image = None
+		if model_version["images"]:
+			image = model_version["images"][0].get("image", model_version["images"][0])["url"]
+		for file in model_version["files"]:
+			file_name = file["name"]
+			file_type = file['type']
+			file_format = file['format']
 
+			# get the file names for the files associated with the models
 			if any(file_name.lower().endswith(ext) for ext in extensions) and file_type.lower() != "vae":
 				update_version_files = True
+				hashes.extend(file.get("hashes", []))
 				
 				if id in version_files.keys() and sanitized_name == version_files[id]['name'] and sanitized_version_name in version_files[id]['versions']:
 					continue # odds that the filename has changed since the last time it was saved is low, skip this file
 
 				if sanitized_version_name not in version_names:
-					version_names.append(sanitized_version_name)
+					version_names.add(sanitized_version_name)
 
 				download_url = f"https://civitai.com/api/download/models/{model_version['id']}?type={file_type}&format={file_format}"
 				file_name_em = file_name[:file_name.rindex(".")] + "_em" + file_name[file_name.rindex("."):]
 				
 				if file_name not in files:
-					files.append(file_name)
+					files.add(file_name)
 
 				if file_name_em not in files and data["type"].lower() == "textualinversion":
-					files.append(file_name_em)
+					files.add(file_name_em)
 
 				url_file_name = get_filename_for_url(download_url)
 
 				if url_file_name is not None and file_name != url_file_name and url_file_name not in files:
 					url_file_name_em = url_file_name[:url_file_name.rindex(".")] + "_em" + url_file_name[url_file_name.rindex("."):]
-					files.append(url_file_name)
+					files.add(url_file_name)
 					if data["type"] == "TextualInversion" and url_file_name_em not in files:
-						files.append(url_file_name_em)
-
-				hash = get_file_hash(model_version["files"][j])
-				if hash is not None:
-					hashes.append(hash)
+						files.add(url_file_name_em)
 
 		if update_version_files:
+			hash_set = set()
+			new_hashes = []
+			for hash in hashes:
+				hash_tup = (hash["type"].lower(), hash["hash"].lower())
+				if hash_tup not in hash_set:
+					hash_set.add(hash_tup)
+					new_hashes.append(hash)
+				
+			new_hashes = sorted(new_hashes, key=lambda h: (h['type'].lower(), h['hash'].lower()))
+
 			update = {}
 			update[id] = {
 				'name': sanitized_name,
-				'versions': version_names,
+				'versions': list(version_names),
 				'html': html,
-				'hashes': hashes,
-				'files': files,
-				'folder': folder_name
+				'hashes': new_hashes,
+				'files': list(files),
+				'folder': folder_name,
+				'image' : image
 			}
 
 			if id in version_files.keys():
 				version_files[id]['name'] = update[id]['name']
-				version_files[id]['versions'].extend(update[id]['versions'])
-				version_files[id]['files'].extend(update[id]['files'])
-				version_files[id]['hashes'].extend(update[id]['hashes'])
+				version_files[id]['versions'] = sorted(list(set(version_files[id]['versions']).union(version_names)))
+				version_files[id]['files'] = sorted(list(set(version_files[id]['files']).union(files)))
 				version_files[id]['html'] = update[id]['html']
 				version_files[id]['folder'] = update[id]['folder']
+				version_files[id]['image'] = update[id]['image']
+
+				if "hashes" in version_files[id]:
+					for hash in version_files[id]['hashes']:
+						if isinstance(hash, str):
+							hash = { "type": "AutoV1", "hash": hash }
+						hash_tup = (hash["type"].lower(), hash["hash"].lower())
+						if hash_tup not in hash_set:
+							hash_set.add(hash_tup)
+							new_hashes.append(hash)
+				
+
+				new_hashes = sorted(new_hashes, key=lambda h: (h['type'].lower(), h['hash'].lower()))
+				version_files[id]['hashes'] = new_hashes
 			else:
 				version_files.update(update)
 
@@ -1099,8 +1424,22 @@ def processJSONData(json_data):
 	json_merge = {}
 	key_name_pairs = []
 
+	if os.path.isfile(args.combine):
+		if args.debug:
+			print(f"Loading {args.combine}")
+		with open(args.combine, 'r') as f:
+			json_merge = json.load(f)
+		f.close()
+
+	if args.debug:
+		print("Create temp dir")
 	# Create temporary files for the md and html strings
 	with tempfile.TemporaryDirectory() as temp_dir:
+		if args.debug:
+			print(f"Temp dir created {temp_dir}")
+
+		keyCount = 0
+
 		# Loop over the keys in the json object
 		for key in json_data:
 			# Get the main page json data
@@ -1108,20 +1447,38 @@ def processJSONData(json_data):
 			data = getPageDataFromModelData(model_data)
 			reviews = getReviewsFromModelData(model_data)
 
-			if len(json_data) > 1 and args.print:
-				print(f"{data['name']} ({key})")
+			keyCount += 1
+			if args.print or args.debug:
+				sys.stdout.write(f"{data['name']} ({key}) ({keyCount}/{len(json_data)})")
+				sys.stdout.flush()
+			if args.debug:
+				print()
 
 			# Generate the md and html strings
 			if args.md:
-				md_string = generate_md_file(data, reviews)
+				if args.debug:
+					print(f"Generate Markdown")
+				if args.md_legacy:
+					md_string = generate_md_file_legacy(data, reviews)
+				else:
+					md_string = generate_md_file(data, reviews)
 			if args.html:
+				if args.debug:
+					print(f"Generate HTML")
 				html_string = generate_html_file(data, reviews)
 
 			if args.file_names:
+				if args.debug:
+					print(f"Generate/update the version files cache")
 				# Generate/update the version files cache
 				generate_version_files_array(data)
+				
+			if args.print and not args.debug:
+				print(f"")
 
 			# Rebuild the json source files
+			if args.debug:
+				print(f"Rebuild the json source files")
 			rebuilt_json = rebuildSourceJSON(data, reviews)
 			json_merge.update(rebuilt_json)
 			json_string = json.dumps(rebuilt_json, indent=2)
@@ -1133,17 +1490,23 @@ def processJSONData(json_data):
 			html_path = os.path.join(temp_dir, f"{sanitize_filename(data['name'], file_name_max_size)}_({key}).html")
 			json_path = os.path.join(temp_dir, f"{sanitize_filename(data['name'], file_name_max_size)}_({key}).json")
 
+			if args.debug:
+				print(f"Write temp files")
+
 			if args.md:
 				with open(md_path, 'w', encoding='utf-8') as f:
 					f.write(md_string.encode('utf-8').decode('utf-8'))
+				f.close()
 
 			if args.html:
 				with open(html_path, 'w', encoding='utf-8') as f:
 					f.write(html_string.encode('utf-8').decode('utf-8'))
+				f.close()
 
 			if args.json:
 				with open(json_path, 'w', encoding='utf-8') as f:
 					f.write(json_string.encode('utf-8').decode('utf-8'))
+				f.close()
 
 			# Add the md and html files to the appropriate lists
 			if args.md:
@@ -1155,6 +1518,8 @@ def processJSONData(json_data):
 
 		# Check if either of the lists has more than one file
 		if len(md_files) > 1 or len(html_files) > 1 or len(json_files) > 1:
+			if args.debug:
+				print(f"Create the zip")
 			# Create the zip files
 			with zipfile.ZipFile('civitai.zip', 'w') as output_zip:
 				outputfiles = []
@@ -1185,25 +1550,34 @@ def processJSONData(json_data):
 				output_zip.writestr('model_nums.md', model_nums_str)
 
 				# Write the merged source json file to the zip
-				output_zip.writestr('merged.json', json.dumps(json_merge, indent=2))
+				output_zip.writestr(args.combine, json.dumps(json_merge, indent=2))
 		else:
+			if args.debug:
+				print(f"Move files from temp folder")
 			if args.md:
 				save_files(md_files)
 			if args.html:
 				save_files(html_files)
 			if args.json:
 				save_files(json_files)
+			with open(args.combine, 'w') as f:
+				json.dump(json_merge, f)
+			f.close()
 
+	"""
 	if image_cache_changed:
 		print("writing image cache")
 		# Save the cache to a file
 		with open('cache.json', 'w') as f:
 			json.dump(image_cache, f)
+		f.close()
+	"""
 
 	if args.file_names:
 		# Save the version files cache to a file
 		with open('version_files.json', 'w') as f:
 			json.dump(version_files, f, indent=2)
+		f.close()
 
 def save_files(files):
 	if len(files) == 1:
@@ -1216,6 +1590,7 @@ def save_files(files):
 		# Get the contents of the file
 		with open(files[0]['path'], 'r', encoding='utf-8') as f:
 			contents = f.read()
+		f.close()
 			
 		# Check if the directory exists
 		if not os.path.exists(folder_name):
@@ -1225,17 +1600,27 @@ def save_files(files):
 		# Write the contents to a new file with the same name and extension as the input file
 		with open(folder_name + '/' + file_name + file_ext, 'w', encoding='utf-8') as f:
 			f.write(contents)
-
+		f.close()
 
 def update_data(old_data, new_data):
 	# Iterate over the keys in the new data
 	for key in new_data:
+		# See if there was an error and skip if there was and error
+		new_state = new_data[key].get('pageData', {}).get('props', {}).get('pageProps', {}).get('trpcState', {}).get('json', {}).get('queries')[0].get('state', {})
+		if new_state.get('status', "").lower() == "error":
+			print(f"Error while building {key} - {new_state.get('error', {}).get('message', 'UNKNOWN ERROR')}")
+			continue
+
 		# If the key exists in the old data, update the old data with the new data
 		if key in old_data:
 			# Update the pageData
-			old_model_versions = old_data[key]['pageData']['props']['pageProps']['trpcState']['json']['queries'][0]['state']['data']['modelVersions']
-			new_model_versions = new_data[key]['pageData']['props']['pageProps']['trpcState']['json']['queries'][0]['state']['data']['modelVersions']
-			
+			try:
+				old_model_versions = old_data[key]['pageData']['props']['pageProps']['trpcState']['json']['queries'][0]['state']['data']['modelVersions']
+				new_model_versions = new_data[key]['pageData']['props']['pageProps']['trpcState']['json']['queries'][0]['state']['data']['modelVersions']
+			except Exception as e:
+				print(f"ERROR with {key} - {e}")
+				exit()
+
 			# check if new model version already exists in old data, if not, extend the array
 			for new_version in new_model_versions:
 				version_found = False
@@ -1260,7 +1645,10 @@ def update_data(old_data, new_data):
 				if not version_found:
 					old_model_versions.append(new_version)
 
-			# update pageData with modified modelVersions array
+			# Update the pageData
+			old_data[key]['pageData'] = new_data[key]['pageData']
+
+			# Put back the old model versions
 			old_data[key]['pageData']['props']['pageProps']['trpcState']['json']['queries'][0]['state']['data']['modelVersions'] = old_model_versions
 			
 			# Update the comments
@@ -1293,13 +1681,45 @@ def update_data(old_data, new_data):
 		else:
 			old_data[key] = new_data[key]
 
+def buildCommentParams(key, model_num, limit, source = {}, cursor = None):
+	if limit > 100:
+		limit = 100
+	if cursor is not None:
+		cursor = int(cursor)
+	out = {
+		key: {
+			"json": {
+				"modelId": int(model_num),
+				"limit": int(limit),
+				"sort": "newest",
+				"cursor": cursor
+			}
+		}
+	}
+	
+	if cursor is None:
+		x = {
+			"meta": {
+				"values": {
+					"cursor": ["undefined"]
+				}
+			}
+		}
+		out[key].update(x)
+		
+	source.update(out)
+	return source
+
+
 def getNewDataFromSiteForModel(model_num):
 	# Make sure it's a valid model number
 	if model_num and int(model_num) > 0:
 		# Set the value of the url_model variable to the URL of the model page
 		url_model = f"https://civitai.com/models/{model_num}/"
+		# build the comment params url string
+		comment_params = urllib.parse.quote(json.dumps(buildCommentParams(1, model_num, comment_limit, buildCommentParams(0, model_num, review_limit))))
 		# Set the value of the url_reviews variable to the URL of the review data
-		url_reviews = f"https://civitai.com/api/trpc/review.getAll,comment.getAll?batch=1&input=%7B%220%22%3A%20%7B%22json%22%3A%20%7B%22modelId%22%3A%20{model_num}%2C%22limit%22%3A%20{review_limit}%2C%22sort%22%3A%20%22newest%22%2C%22cursor%22%3A%20null%7D%2C%22meta%22%3A%20%7B%22values%22%3A%20%7B%22cursor%22%3A%20%5B%22undefined%22%5D%7D%7D%7D%2C%221%22%3A%20%7B%22json%22%3A%20%7B%22modelId%22%3A%20{model_num}%2C%22limit%22%3A%20{comment_limit}%2C%22sort%22%3A%20%22newest%22%2C%22cursor%22%3A%20null%7D%2C%22meta%22%3A%7B%22values%22%3A%7B%22cursor%22%3A%5B%22undefined%22%5D%7D%7D%7D%7D"
+		url_reviews = f"https://civitai.com/api/trpc/review.getAll,comment.getAll?batch=1&input={comment_params}"
 		# Send a GET request to the model page and parse the response
 		response = requests.get(url_model)
 
@@ -1307,6 +1727,8 @@ def getNewDataFromSiteForModel(model_num):
 			doc = BeautifulSoup(response.text, "html.parser")
 		else:
 			print("Error: Invalid response from server")
+			print(response)
+			exit()
 
 		# Extract the page data from the response
 		page_data = doc.find(id="__NEXT_DATA__").text
@@ -1333,6 +1755,38 @@ def getNewDataFromSiteForModel(model_num):
 		# Send a GET request to the review page and parse the response
 		response = requests.get(url_reviews, headers=headers)
 		review_data = response.json()
+
+		review_count = 0
+		nextCursor = None
+		reviewKey = 0
+
+		reviews = review_data[reviewKey].get('result', {}).get('data', {}).get('json', {}).get('reviews', None)
+		if reviews is None:
+			reviewKey = 1
+			reviews = review_data[reviewKey].get('result', {}).get('data', {}).get('json', {}).get('reviews', None)
+
+		if reviews is not None:
+			review_count = len(reviews)
+			nextCursor = review_data[reviewKey].get('result', {}).get('data', {}).get('json', {}).get('nextCursor', None)
+
+		while nextCursor is not None and review_count < review_limit:
+			if args.print:
+				print(f"Getting next bunch of reviews. Count at: {review_count}. Limit: {review_limit}")
+			comment_params = urllib.parse.quote(json.dumps(buildCommentParams(0, model_num, review_limit, cursor=nextCursor)))
+			# Set the value of the url_reviews variable to the URL of the review data
+			url_reviews = f"https://civitai.com/api/trpc/review.getAll?batch=1&input={comment_params}"
+			response = requests.get(url_reviews, headers=headers)
+			new_review_data = response.json()
+			new_reviews = new_review_data[0].get('result', {}).get('data', {}).get('json', {}).get('reviews', [])
+			nextCursor = new_review_data[0].get('result', {}).get('data', {}).get('json', {}).get('nextCursor', None)
+			review_count += len(new_reviews)
+			print(f"Cursor = {nextCursor}")
+			for review in new_reviews:
+				main_reviews = review_data[0].get('result', {}).get('data', {}).get('json', {}).get('reviews', [])
+				if review["id"] not in [r["id"] for r in main_reviews]:
+					main_reviews.append(review)
+
+
 		# Add the data to the data object
 		new_data = {}
 		new_data[model_num] = {
@@ -1353,31 +1807,57 @@ def getNewDataFromSiteForModel(model_num):
 # Initialize the data object
 data = {}
 
+countArgs = 0
+
 for arg in args.args:
+	countArgs += 1
 	# If the value is a file path, load the JSON data from the file and add it to the data object
 	if os.path.isfile(arg):
+		if args.debug:
+			print(f"Loading {arg}")
 		with open(arg, 'r') as f:
 			file_data = json.load(f)
+		f.close()
 		
+		countKey = 0
+		fileDataLen = len(file_data)
 		# Sanitize the reviews/comments object by processing them and then un-processing them
 		for key in file_data:
+			countKey += 1
+			if args.debug:
+				print(f"Sanitize reviews/comments")
 			file_data[key]["reviewData"] = rebuildReviewsJson(getReviewsFromModelData(file_data[key]))
 			
 			if args.update:
+				if args.print or args.debug:
+					print(f"Downloading {key} ({countArgs}.{countKey}/{len(args.args)}.{fileDataLen})")
 				# Request the new data from the website for this model
 				new_data = getNewDataFromSiteForModel(key)
+				if args.debug:
+					print(f"Update model")
 				# Update the data dictionary with the new data
 				update_data(file_data, new_data)
 		
+		if args.debug:
+			print(f"Update json")
 		# Update the data dictionary with the new data
 		update_data(data, file_data)
 
 	# Otherwise, assume it's a model number and send a GET request for the data
 	else:
+		if args.print or args.debug:
+			print(f"Downloading {arg} ({countArgs}/{len(args.args)})")
 		# Request the new data from the website for this model
 		new_data = getNewDataFromSiteForModel(arg)
 		# Update the data dictionary with the new data
 		update_data(data, new_data)
 
+if args.debug:
+	print(f"Process json")
 # Run the code to process the data
 processJSONData(data)
+
+# output the elapsed time
+if args.debug:
+	elapsed_time = time.time() - start_time
+	print(f"[INFO] Script completed in {elapsed_time:.2f} seconds")
