@@ -1,10 +1,10 @@
 """
 READ ME
 
-Intended to be used when upgrading to v2 which doesnt use cache.json anymore.
+Intended to be used when upgrading to v2 which doesn't use cache.json anymore.
 This code will convert the base64 strings in cache.json to individual files located in the subfolder 'image_cache/'.
 After upgrading you can delete cache.json.
-Alternatively you can choose to just delete cache.json and have the files redownload the next time you run get.py.
+Alternatively you can choose to just delete cache.json and have the files re-downloaded the next time you run get.py.
 """
 
 import os

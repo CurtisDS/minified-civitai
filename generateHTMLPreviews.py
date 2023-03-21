@@ -2,12 +2,12 @@
 READ ME
 
 This code assumes its being run from a folder 'stable-diffusion-webui\custom-files\minified-civitai'
-If you are copying this directory structure you will probably want a .gitignore file located in custom-files that only contains '*' to remove the folder and subfolders from the automatic1111 git repository.
-This code also assumes all of the downloaded minified civitai webpages are located in respective subfolders eg: 'minified-civitai/models' etc
+If you are copying this directory structure you will probably want a .gitignore file located in custom-files that only contains '*' to remove the folder and sub-folders from the automatic1111 git repository.
+This code also assumes all of the downloaded minified civitai webpages are located in respective sub-folders eg: 'minified-civitai/models' etc
 It then uses a relative path to find your model folders eg: '..\..\models\Stable-diffusion' should point to 'stable-diffusion-webui\models\Stable-diffusion'
 Then it will create a subfolder in the models folder called 'Previews' and create an html file that uses an iframe to link back to the minified civitai page located in the corresponding minified-civitai folder eg: 'stable-diffusion-webui\custom-files\minified-civitai\models'
-This way if you have mulitple versions of the same model you dont have to store mulitple large html files.
-In order to create the html file it uses version_files.json to look up the expected file names of your models. If you have changed your model names you can try and use the hash to match (will take a bit) or manually edit the json file to add your existing file name to the correspoinding version.
+This way if you have multiple versions of the same model you dont have to store multiple large html files.
+In order to create the html file it uses version_files.json to look up the expected file names of your models. If you have changed your model names you can try and use the hash to match (run with argument -f) or manually edit the json file to add your existing file name to the corresponding version.
 """
 
 import os
