@@ -5,8 +5,7 @@ import json
 import time
 import shlex
 import base64
-import zipfile
-import tempfile
+import random
 import argparse
 import requests
 import markdownify
@@ -113,26 +112,6 @@ if debug_arguments:
 	print(out)
 	exit()
 
-"""
-# Load the image cache from a file if it exists
-try:
-	with open('cache.json', 'r') as f:
-		image_cache = json.load(f)
-	f.close()
-except FileNotFoundError:
-	image_cache = {}
-
-try:
-	with open('cache2.json', 'r') as f:
-		image_cache2 = json.load(f)
-	f.close()
-except FileNotFoundError:
-	image_cache2 = {}
-"""
-image_cache = {}
-image_cache2 = {}
-image_cache_changed = False
-
 # Load the file names previously found from a file if it exists
 
 if os.path.isfile('version_files.json'):
@@ -146,21 +125,28 @@ else:
 def natural_order_number(s):
 	return [int(x) if x.isdigit() else x.lower() for x in re.split('(\d+)', s)]
 
+image_cache_set = {}
+
 # Download an image and convert it to base64, unless it was previously already done so and saved in the image cache then just return the base64 stream or just the direct civitai url if no-base64-images is set
+def image_to_url(image_key):
+	if image_key not in image_cache_set:
+		buffer = convert_image_to_base64(image_key)
+		image_cache_set[image_key] = buffer
+		return buffer
+	else:
+		return image_cache_set[image_key]
+
 def convert_image_to_base64(image_key):
 	if image_key is None or image_key == "":
 		return ""
 
-	image_url = img_url(image_key)
+	image_url = f"https://imagecache.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/{image_key}/width=400"
 	
 	if args.no_base64_images:
 		return image_url
 
 	if args.debug:
 		sys.stdout.write(f'Searching cache ({image_url})...')
-		sys.stdout.flush()
-	elif args.print:
-		sys.stdout.write(f'.')
 		sys.stdout.flush()
 
 	# Try to find and load the image from the image cache of files
@@ -179,6 +165,10 @@ def convert_image_to_base64(image_key):
 		# Image is not cached so attempt to fetch it from the website
 		if args.debug:
 			sys.stdout.write(' Downloading image...')
+			sys.stdout.flush()
+		elif args.print and random.random() < 0.3:
+			# only output this 1/3 of the time
+			sys.stdout.write(f'.')
 			sys.stdout.flush()
 		try:
 			response = requests.get(image_url)
@@ -224,101 +214,12 @@ def convert_image_to_base64(image_key):
 		print('!')
 	return result
 
-def convert_image_to_base64_deprecated(image):
-	global image_cache_changed
-
-	if image is None or image == "":
-		return ""
-
-	image_url = img_url(image)
-	
-	if args.no_base64_images:
-		return image_url
-
-	if args.debug:
-		sys.stdout.write(f'Searching cache ({image_url})...')
-		sys.stdout.flush()
-	elif args.print:
-		sys.stdout.write(f'.')
-		sys.stdout.flush()
-	cached_image = image_cache.get(image_url, None)
-
-	# If the URL is in the cache, return the value
-	if cached_image is not None:
-		if args.debug:
-			print('!')
-		return cached_image
-
-	# Check the secondary cache (which has a dictionary that points to a local path file)
-	image_path = image_cache2.get(image_url, None)
-
-	if image_path is not None:
-		try:
-			image = Image.open(image_path)
-			buffer = BytesIO()
-			format = image.format
-			image.save(buffer, format=format)
-			base64_image = base64.b64encode(buffer.getvalue()).decode()
-			result = f"data:image/{format};base64,{base64_image}"
-			image_cache[image_url] = result  # Add the URL and base64 to the cache
-			image_cache_changed = True
-			if args.debug:
-				print('!')
-			return result
-		except:
-			print("Failed to cache local image " + image_path)
-
-	# Both caches do not contain the image so attempt to fetch it from the website
-	if args.debug:
-		sys.stdout.write(' Downloading image...')
-		sys.stdout.flush()
-	try:
-		response = requests.get(image_url)
-		image_data = response.content
-	except Exception as e:
-		if args.debug:
-			print('ED!')
-			print(e)
-		elif args.print:
-			sys.stdout.write(f'!')
-			sys.stdout.flush()
-		try:
-			if image_url not in image_cache.keys():
-				image_cache[image_url] = None  # Add the URL with a None value to the cache
-				image_cache_changed = True
-		except Exception as ex:
-			print(ex)
-		return image_url
-	try:
-		image = Image.open(BytesIO(image_data))
-		format = "JPEG" if image.format == "JPEG" else "PNG"
-		base64_image = base64.b64encode(image_data).decode('utf-8')
-		result = f"data:image/{format};base64,{base64_image}"
-		image_cache[image_url] = result  # Add the URL and base64 to the cache
-		image_cache_changed = True
-		if args.debug:
-			print('!')
-		return result
-	except Image.UnidentifiedImageError:
-		if args.debug:
-			print('EI!')
-		elif args.print:
-			sys.stdout.write(f'!')
-			sys.stdout.flush()
-		if image_url not in image_cache.keys():
-			image_cache[image_url] = None  # Add the URL with a None value to the cache
-			image_cache_changed = True
-	return image_url
-
-def img_url(x):
-	return f"https://imagecache.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/{x}/width=400"
-
 def img_md_legacy(image):
 	# Return an empty string if the image object is None
 	if image is None:
 		return ""
 
-	out = [f"->![image]({convert_image_to_base64(image['url'])})<-\n"]
+	out = [f"->![image]({image_to_url(image['url'])})<-\n"]
 	if image['meta'] is not None:
 		meta_tags = list(image['meta'].keys())
 		if meta_tags:
@@ -345,7 +246,7 @@ def img_md(image):
 		return ""
 
 	out = ['<div style="display: inline-block; width: 410px; vertical-align: top; text-align: center; margin: 5px">']
-	out.append(f'<img style="width: 400px; margin:auto" src="{convert_image_to_base64(image["url"])}">')
+	out.append(f'<img style="width: 400px; margin:auto" src="{image_to_url(image["url"])}">')
 
 	if image['meta'] is not None:
 		meta_tags = list(image['meta'].keys())
@@ -373,7 +274,7 @@ def img_html(image):
 	if image is None:
 		return ""
 
-	out = [f'<div class="img-container"><img src="{convert_image_to_base64(image["url"])}" />']
+	out = [f'<div class="img-container"><img src="{image_to_url(image["url"])}" />']
 	if image['meta'] is not None:
 		meta_tags = list(image['meta'].keys())
 		if meta_tags:
@@ -1293,7 +1194,7 @@ def rebuildSourceJSON(data, reviews):
 			}
 		}
 	}
-	out[data["id"]] = {
+	out[str(data["id"])] = {
 		"pageData": page_data,
 		"reviewData": rebuildReviewsJson(reviews)
 	}
@@ -1418,11 +1319,7 @@ def generate_version_files_array(data):
 
 def processJSONData(json_data):
 	# Create empty lists for the md and html files
-	md_files = []
-	html_files = []
-	json_files = []
 	json_merge = {}
-	key_name_pairs = []
 
 	if os.path.isfile(args.combine):
 		if args.debug:
@@ -1431,175 +1328,91 @@ def processJSONData(json_data):
 			json_merge = json.load(f)
 		f.close()
 
-	if args.debug:
-		print("Create temp dir")
-	# Create temporary files for the md and html strings
-	with tempfile.TemporaryDirectory() as temp_dir:
+	keyCount = 0
+	# Loop over the keys in the json object
+	for key in json_data:
+		# Get the main page json data
+		model_data = json_data[key]
+		data = getPageDataFromModelData(model_data)
+		reviews = getReviewsFromModelData(model_data)
+
+		keyCount += 1
+		if args.print or args.debug:
+			sys.stdout.write(f"{data['name']} ({key}) ({keyCount}/{len(json_data)})")
+			sys.stdout.flush()
 		if args.debug:
-			print(f"Temp dir created {temp_dir}")
+			print()
 
-		keyCount = 0
+		# Clear the runtime image cache so that it doesnt get too big
+		image_cache_set.clear()
 
-		# Loop over the keys in the json object
-		for key in json_data:
-			# Get the main page json data
-			model_data = json_data[key]
-			data = getPageDataFromModelData(model_data)
-			reviews = getReviewsFromModelData(model_data)
-
-			keyCount += 1
-			if args.print or args.debug:
-				sys.stdout.write(f"{data['name']} ({key}) ({keyCount}/{len(json_data)})")
-				sys.stdout.flush()
+		# Generate the md and html strings
+		if args.md:
 			if args.debug:
-				print()
-
-			# Generate the md and html strings
-			if args.md:
-				if args.debug:
-					print(f"Generate Markdown")
-				if args.md_legacy:
-					md_string = generate_md_file_legacy(data, reviews)
-				else:
-					md_string = generate_md_file(data, reviews)
-			if args.html:
-				if args.debug:
-					print(f"Generate HTML")
-				html_string = generate_html_file(data, reviews)
-
-			if args.file_names:
-				if args.debug:
-					print(f"Generate/update the version files cache")
-				# Generate/update the version files cache
-				generate_version_files_array(data)
-				
-			if args.print and not args.debug:
-				print(f"")
-
-			# Rebuild the json source files
+				print(f"Generate Markdown")
+			if args.md_legacy:
+				md_string = generate_md_file_legacy(data, reviews)
+			else:
+				md_string = generate_md_file(data, reviews)
+		if args.html:
 			if args.debug:
-				print(f"Rebuild the json source files")
-			rebuilt_json = rebuildSourceJSON(data, reviews)
-			json_merge.update(rebuilt_json)
-			json_string = json.dumps(rebuilt_json, indent=2)
+				print(f"Generate HTML")
+			html_string = generate_html_file(data, reviews)
 
-			folder_name = get_folder(data['type'])
-			key_name_pairs.append([key, data['name']])
+		if args.file_names:
+			if args.debug:
+				print(f"Generate/update the version files cache")
+			# Generate/update the version files cache
+			generate_version_files_array(data)
 			
-			md_path = os.path.join(temp_dir, f"{sanitize_filename(data['name'], file_name_max_size)}_({key}).md")
-			html_path = os.path.join(temp_dir, f"{sanitize_filename(data['name'], file_name_max_size)}_({key}).html")
-			json_path = os.path.join(temp_dir, f"{sanitize_filename(data['name'], file_name_max_size)}_({key}).json")
+		if args.print and not args.debug:
+			print(f" Creating files")
 
-			if args.debug:
-				print(f"Write temp files")
+		# Rebuild the json source files
+		if args.debug:
+			print(f"Rebuild the json source files")
+		rebuilt_json = rebuildSourceJSON(data, reviews)
+		json_merge.update(rebuilt_json)
+		json_string = json.dumps(rebuilt_json, indent=2)
 
-			if args.md:
-				with open(md_path, 'w', encoding='utf-8') as f:
-					f.write(md_string.encode('utf-8').decode('utf-8'))
-				f.close()
+		folder_name = get_folder(data['type'])
 
-			if args.html:
-				with open(html_path, 'w', encoding='utf-8') as f:
-					f.write(html_string.encode('utf-8').decode('utf-8'))
-				f.close()
+		# Check if the directory exists
+		if not os.path.exists(folder_name):
+			# If it doesn't exist, create the directory
+			os.makedirs(folder_name)
+		
+		md_path = os.path.join(folder_name, f"{sanitize_filename(data['name'], file_name_max_size)}_({key}).md")
+		html_path = os.path.join(folder_name, f"{sanitize_filename(data['name'], file_name_max_size)}_({key}).html")
+		json_path = os.path.join(folder_name, f"{sanitize_filename(data['name'], file_name_max_size)}_({key}).json")
 
-			if args.json:
-				with open(json_path, 'w', encoding='utf-8') as f:
-					f.write(json_string.encode('utf-8').decode('utf-8'))
-				f.close()
+		if args.debug:
+			print(f"Writing files")
 
-			# Add the md and html files to the appropriate lists
-			if args.md:
-				md_files.append({'path': md_path, 'folder': folder_name})
-			if args.html:
-				html_files.append({'path': html_path, 'folder': folder_name})
-			if args.json:
-				json_files.append({'path': json_path, 'folder': folder_name})
-
-		# Check if either of the lists has more than one file
-		if len(md_files) > 1 or len(html_files) > 1 or len(json_files) > 1:
-			if args.debug:
-				print(f"Create the zip")
-			# Create the zip files
-			with zipfile.ZipFile('civitai.zip', 'w') as output_zip:
-				outputfiles = []
-				
-				if args.md:
-					outputfiles += md_files
-				if args.html:
-					outputfiles += html_files
-				if args.json:
-					outputfiles += json_files
-
-				for file in outputfiles:
-					arcname = file['folder'] + '/' + os.path.basename(file['path'])
-					output_zip.write(file['path'], arcname=arcname)
-				
-				# Generate and save a markdown file that contains the arguments used when generating this zip and which models were generated
-				sorted_pairs = sorted(key_name_pairs, key=lambda x: x[1].lower())
-				joined_pairs = "\n".join(["|".join(pair) for pair in sorted_pairs])
-
-				model_nums_str = f'# Arguments:\n'
-				model_nums_str += f'``` text\n'
-				model_nums_str += ' '.join(args.args)
-				model_nums_str += f'\n```\n\n'
-				model_nums_str += f'# Models:\n'
-				model_nums_str += f'Key|Model\n'
-				model_nums_str += f'-|-\n'
-				model_nums_str += joined_pairs
-				output_zip.writestr('model_nums.md', model_nums_str)
-
-				# Write the merged source json file to the zip
-				output_zip.writestr(args.combine, json.dumps(json_merge, indent=2))
-		else:
-			if args.debug:
-				print(f"Move files from temp folder")
-			if args.md:
-				save_files(md_files)
-			if args.html:
-				save_files(html_files)
-			if args.json:
-				save_files(json_files)
-			with open(args.combine, 'w') as f:
-				json.dump(json_merge, f)
+		if args.md:
+			with open(md_path, 'w', encoding='utf-8') as f:
+				f.write(md_string.encode('utf-8').decode('utf-8'))
 			f.close()
 
-	"""
-	if image_cache_changed:
-		print("writing image cache")
-		# Save the cache to a file
-		with open('cache.json', 'w') as f:
-			json.dump(image_cache, f)
-		f.close()
-	"""
+		if args.html:
+			with open(html_path, 'w', encoding='utf-8') as f:
+				f.write(html_string.encode('utf-8').decode('utf-8'))
+			f.close()
+
+		if args.json:
+			with open(json_path, 'w', encoding='utf-8') as f:
+				f.write(json_string.encode('utf-8').decode('utf-8'))
+			f.close()
+
+	with open(args.combine, 'w', encoding='utf-8') as f:
+		json_string = json.dumps(json_merge, indent=2)
+		f.write(json_string.encode('utf-8').decode('utf-8'))
+	f.close()
 
 	if args.file_names:
 		# Save the version files cache to a file
 		with open('version_files.json', 'w') as f:
 			json.dump(version_files, f, indent=2)
-		f.close()
-
-def save_files(files):
-	if len(files) == 1:
-		# Get the file name and extension of the file
-		file_name, file_ext = os.path.splitext(os.path.basename(files[0]['path']))
-		folder_name = files[0]['folder']
-
-		print(folder_name + "/" + file_name + file_ext)
-			
-		# Get the contents of the file
-		with open(files[0]['path'], 'r', encoding='utf-8') as f:
-			contents = f.read()
-		f.close()
-			
-		# Check if the directory exists
-		if not os.path.exists(folder_name):
-			# If it doesn't exist, create the directory
-			os.makedirs(folder_name)
-			
-		# Write the contents to a new file with the same name and extension as the input file
-		with open(folder_name + '/' + file_name + file_ext, 'w', encoding='utf-8') as f:
-			f.write(contents)
 		f.close()
 
 def update_data(old_data, new_data):
@@ -1858,6 +1671,5 @@ if args.debug:
 processJSONData(data)
 
 # output the elapsed time
-if args.debug:
-	elapsed_time = time.time() - start_time
-	print(f"[INFO] Script completed in {elapsed_time:.2f} seconds")
+elapsed_time = time.time() - start_time
+print(f"[INFO] Script completed in {elapsed_time:.2f} seconds")
