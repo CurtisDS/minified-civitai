@@ -133,6 +133,14 @@ if os.path.isfile('version_files.json'):
 else:
 	version_files = {}
 
+# Load cookie file
+if os.path.isfile('cookie.txt'):
+	with open('cookie.txt', 'r') as f:
+		cookie = f.read()
+	f.close()
+else:
+	cookie = None
+
 # split a string into segments of strings and ints that will be used to sort something naturally
 def natural_order_number(s):
 	return [int(x) if x.isdigit() else x.lower() for x in re.split('(\d+)', s)]
@@ -140,13 +148,25 @@ def natural_order_number(s):
 image_cache_set = {}
 
 # Download an image and convert it to base64, unless it was previously already done so and saved in the image cache then just return the base64 stream or just the direct civitai url if no-base64-images is set
-def image_to_url(image_key):
+def image_to_url(image):
+	image_key = get_image_key(image)
 	if image_key not in image_cache_set:
 		buffer = convert_image_to_base64(image_key)
 		image_cache_set[image_key] = buffer
 		return buffer
 	else:
 		return image_cache_set[image_key]
+
+def get_image_key(image):
+	return image['url'].replace("https://imagecache.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/", "").split("/")[0]
+
+def is_same_image_id(new_image, old_image):
+	# The new api doesn't have an image id attribute but it does include the id at the end of the url attribute.
+	if 'id' not in new_image:
+		new_image['id'] = int(new_image['url'].split("/")[-1])
+	if 'id' not in old_image:
+		old_image['id'] = int(old_image['url'].split("/")[-1])
+	return new_image['id'] == old_image['id']
 
 def convert_image_to_base64(image_key):
 	if image_key is None or image_key == "":
@@ -231,7 +251,7 @@ def img_md_legacy(image):
 	if image is None:
 		return ""
 
-	out = [f"->![image]({image_to_url(image['url'])})<-\n"]
+	out = [f"->![image]({image_to_url(image)})<-\n"]
 	if image['meta'] is not None:
 		meta_tags = list(image['meta'].keys())
 		if meta_tags:
@@ -245,7 +265,7 @@ def img_md_legacy(image):
 				if tag == "cfgScale":
 					# Add the cfgScale meta data to the output string
 					meta_out.append(f"CFG scale: {image['meta']['cfgScale']}, ")
-				elif tag != "prompt" and tag != "negativePrompt":
+				elif tag != "prompt" and tag != "negativePrompt" and tag != "resources" and tag != "hashes":
 					# Add the other meta data to the output string, convert the tag to Proper case
 					meta_out.append(re.sub(r'\b\w', lambda x: x.group(0).upper(), tag, count=1) + ": " + str(image['meta'][tag]) + ", ")
 			# Remove any trailing commas or whitespace
@@ -258,7 +278,7 @@ def img_md(image):
 		return ""
 
 	out = ['<div style="display: inline-block; width: 410px; vertical-align: top; text-align: center; margin: 5px">']
-	out.append(f'<img style="width: 400px; margin:auto" src="{image_to_url(image["url"])}">')
+	out.append(f'<img style="width: 400px; margin:auto" src="{image_to_url(image)}">')
 
 	if image['meta'] is not None:
 		meta_tags = list(image['meta'].keys())
@@ -273,7 +293,7 @@ def img_md(image):
 				if tag == "cfgScale":
 					# Add the cfgScale meta data to the output string
 					meta_out.append(f"CFG scale: {image['meta']['cfgScale']}, ")
-				elif tag != "prompt" and tag != "negativePrompt":
+				elif tag != "prompt" and tag != "negativePrompt" and tag != "resources" and tag != "hashes":
 					# Add the other meta data to the output string, convert the tag to Proper case
 					meta_out.append(re.sub(r'\b\w', lambda x: x.group(0).upper(), tag, count=1) + ": " + str(image['meta'][tag]) + ", ")
 			# Remove any trailing commas or whitespace
@@ -286,7 +306,7 @@ def img_html(image):
 	if image is None:
 		return ""
 
-	out = [f'<div class="img-container"><img src="{image_to_url(image["url"])}" />']
+	out = [f'<div class="img-container"><img src="{image_to_url(image)}" />']
 	if image['meta'] is not None:
 		meta_tags = list(image['meta'].keys())
 		if meta_tags:
@@ -301,7 +321,7 @@ def img_html(image):
 				if tag == "cfgScale":
 					# Add the cfgScale meta data to the output string
 					meta_out.append(f"CFG scale: {image['meta']['cfgScale']}, ")
-				elif tag != "prompt" and tag != "negativePrompt":
+				elif tag != "prompt" and tag != "negativePrompt" and tag != "resources" and tag != "hashes":
 					# Add the other meta data to the output string, convert the tag to Proper case
 					meta_out.append(re.sub(r'\b\w', lambda x: x.group(0).upper(), tag, count=1) + ": " + str(image['meta'][tag]) + ", ")
 			# Remove any trailing commas or whitespace
@@ -376,9 +396,11 @@ def html_to_markdown(HTML):
 	return HTML
 
 def get_file_hash(file, hash_type = "AutoV1"):
-	if file['hashes'] and file['hashes'] is not None and len(file['hashes']) > 0:
+	if 'hashes' in file and file['hashes'] is not None and len(file['hashes']) > 0:
+		if hash_type in file['hashes']:
+			return file['hashes'][hash_type]
 		for hash in file['hashes']:
-			if hash['type'] and hash['type'] is not None and hash['type'].lower() == hash_type.lower():
+			if 'type' in hash and hash['type'] is not None and hash['type'].lower() == hash_type.lower():
 				return hash['hash']
 	return None
 
@@ -412,7 +434,7 @@ def generate_md_file_legacy(data, reviews):
 		# Add a link to download the model version to the output string
 		# Loop through the files for this model
 		for j, file in enumerate(model_version['files']):
-			download_url = f"https://civitai.com/api/download/models/{model_version['id']}?type={urllib.parse.quote(file['type'])}&format={urllib.parse.quote(file['format'])}"
+			download_url = file.get('downloadUrl', f"https://civitai.com/api/download/models/{model_version['id']}?type={urllib.parse.quote(file['type'])}&format={urllib.parse.quote(file['format'])}")
 			# Add any other files to the output
 			if j == 0:
 				out.append(f"    **[Download ({format_kb(file['sizeKB'])})]({download_url})**")
@@ -428,8 +450,9 @@ def generate_md_file_legacy(data, reviews):
 		# Add the model version name and other data to the output string
 		out.append(f"Version|{model_version['name']}\n")
 		out.append("-|-\n")
-		out.append(f"Rating|{generate_stars(model_version['rank']['ratingAllTime'], 5)} ({model_version['rank']['ratingCountAllTime']})\n")
-		out.append(f"Downloads|{model_version['rank']['downloadCountAllTime']}\n")
+		if 'rank' in model_version:
+			out.append(f"Rating|{generate_stars(model_version['rank']['ratingAllTime'], 5)} ({model_version['rank']['ratingCountAllTime']})\n")
+			out.append(f"Downloads|{model_version['rank']['downloadCountAllTime']}\n")
 		out.append(f"Uploaded|{format_date(model_version['createdAt'])}\n")
 		if model_version['trainedWords']:
 			# Concatenate all trained words into a string and wrap them with tilda (`) characters separating with commas
@@ -512,7 +535,7 @@ def generate_md_file(data, reviews):
 		# Add a link to download the model version to the output string
 		# Loop through the files for this model
 		for j, file in enumerate(model_version['files']):
-			download_url = f"https://civitai.com/api/download/models/{model_version['id']}?type={urllib.parse.quote(file['type'])}&format={urllib.parse.quote(file['format'])}"
+			download_url = file.get('downloadUrl', f"https://civitai.com/api/download/models/{model_version['id']}?type={urllib.parse.quote(file['type'])}&format={urllib.parse.quote(file['format'])}")
 			# Add any other files to the output
 			if j == 0:
 				out.append(f"[**Download ({format_kb(file['sizeKB'])})**]({download_url})")
@@ -528,8 +551,9 @@ def generate_md_file(data, reviews):
 		# Add the model version name and other data to the output string
 		out.append(f"Version|{model_version['name']}\n")
 		out.append("-|-\n")
-		out.append(f"Rating|{generate_stars(model_version['rank']['ratingAllTime'], 5)} ({model_version['rank']['ratingCountAllTime']})\n")
-		out.append(f"Downloads|{model_version['rank']['downloadCountAllTime']}\n")
+		if 'rank' in model_version:
+			out.append(f"Rating|{generate_stars(model_version['rank']['ratingAllTime'], 5)} ({model_version['rank']['ratingCountAllTime']})\n")
+			out.append(f"Downloads|{model_version['rank']['downloadCountAllTime']}\n")
 		out.append(f"Uploaded|{format_date(model_version['createdAt'])}\n")
 		if model_version['trainedWords']:
 			# Concatenate all trained words into a string and wrap them with tilda (`) characters separating with commas
@@ -1006,13 +1030,14 @@ def generate_html_file(data, reviews):
 				tag = file["format"] + pruned
 			else:
 				tag = file["type"]
-			download_url = f'https://civitai.com/api/download/models/{model_version["id"]}?type={file["type"]}&format={file["format"]}'
+			download_url = file.get('downloadUrl', f'https://civitai.com/api/download/models/{model_version["id"]}?type={file["type"]}&format={file["format"]}')
 			versions_out.append(f'<li><a href="{download_url}" {" ".join(hash_tag)} target="_blank" rel="noopener noreferrer">{tag}</a></li>\n')
 		versions_out.append(f'</ul>\n')
 		
 		versions_out.append(f'<div class="version-description"><table>\n')
-		versions_out.append(f'<tr><th>Rating</th><td>{generate_stars(model_version["rank"]["ratingAllTime"], 5)} ({model_version["rank"]["ratingCountAllTime"]})</td></tr>\n')
-		versions_out.append(f'<tr><th>Downloads</th><td>{model_version["rank"]["downloadCountAllTime"]}</td></tr>\n')
+		if 'rank' in model_version:
+			versions_out.append(f'<tr><th>Rating</th><td>{generate_stars(model_version["rank"]["ratingAllTime"], 5)} ({model_version["rank"]["ratingCountAllTime"]})</td></tr>\n')
+			versions_out.append(f'<tr><th>Downloads</th><td>{model_version["rank"]["downloadCountAllTime"]}</td></tr>\n')
 		versions_out.append(f'<tr><th>Uploaded</th><td>{format_date(model_version["createdAt"])}</td></tr>\n')
 		if model_version["trainedWords"]:
 			versions_out.append('<tr><th>Trigger Words</th><td><div class="tag-container">')
@@ -1048,11 +1073,12 @@ def generate_html_file(data, reviews):
 			if ("text" not in review or review["text"] is None) and ("content" not in review or review["content"] is None) and ("images" not in review or len(review["images"]) == 0):
 				continue
 			# Get the create time
-			date = datetime.strptime(review["createdAt"], "%Y-%m-%dT%H:%M:%S.%fZ")
+			date_string = review["createdAt"]
+			date = datetime.strptime(date_string, "%Y-%m-%dT%H:%M:%S.%fZ")
 			# Convert the datetime object to a timestamp (integer)
 			timestamp = date.timestamp()
 			# Add the username as a subheading
-			out.append(f'<div class="comment" style="order: {int(timestamp)*-1}"><div class="comment-heading"><h5>{review["user"]["username"]}</h5>\n')
+			out.append(f'<div class="comment" style="order: {int(timestamp)*-1}"><div class="comment-heading"><h5 title-time-stamp="{date_string}">{review["user"]["username"]}</h5>\n')
 			if "rating" in review and review["rating"] is not None:
 				out.append(f'<div class="comment-rating">{generate_stars(review["rating"], 5)}</div>')
 			out.append(f'</div>\n')
@@ -1074,9 +1100,19 @@ def generate_html_file(data, reviews):
 	# Include these links just to have handy, they will not appear in the markdown preview because their hypertext is empty
 	out.append("<!-- https://rentry.org/ https://ghostarchive.org/ -->")
 	# Add a section for the source and archive links, hide the archive link by default. Remove the wrapping [​]() to make visible
-	out.append(f'<div class="source"><a href="https://civitai.com/models/{data["id"]}" target="_blank" rel="noopener noreferrer">Source</a> | <a href="https://civitai.com/user/{data["user"]["username"]}" target="_blank" rel="noopener noreferrer">Author</a></div>\n')
+	out.append(f'<div class="source"><a href="https://civitai.com/models/{data["id"]}" target="_blank" rel="noopener noreferrer">Source</a> | <a href="https://civitai.com/user/{data.get("creator", data.get("user", {}))["username"]}" target="_blank" rel="noopener noreferrer">Author</a></div>\n')
 	out.append("</div>\n")
 	out.append("""<script>
+	function utcToLocalDatetimeString(utcTimestamp) {
+		if(typeof utcTimestamp == 'undefined') return '';
+		return new Date(utcTimestamp).toLocaleString();
+	}
+
+	setTitles = document.querySelectorAll('h5[title-time-stamp]');
+	setTitles.forEach(title => {
+		title.setAttribute('title', utcToLocalDatetimeString(title.getAttribute('title-time-stamp')));
+	});
+
 	const images = document.querySelectorAll(".img-container img");
 	const overlay = document.createElement("div");
 	overlay.setAttribute("id", "overlay");
@@ -1250,7 +1286,7 @@ def generate_version_files_array(data):
 		sanitized_version_name = sanitize_filename(model_version['name'], file_name_max_size)
 		image = None
 		if model_version["images"]:
-			image = model_version["images"][0].get("image", model_version["images"][0])["url"]
+			image = get_image_key(model_version["images"][0].get("image", model_version["images"][0]))
 		for file in model_version["files"]:
 			file_name = file["name"]
 			file_type = file['type']
@@ -1259,15 +1295,21 @@ def generate_version_files_array(data):
 			# get the file names for the files associated with the models
 			if any(file_name.lower().endswith(ext) for ext in extensions) and file_type.lower() != "vae":
 				update_version_files = True
-				hashes.extend(file.get("hashes", []))
-				
-				if id in version_files.keys() and sanitized_name == version_files[id]['name'] and sanitized_version_name in version_files[id]['versions']:
-					continue # odds that the filename has changed since the last time it was saved is low, skip this file
+				temp_hashes = []
 
+				# if the file has a dictionary of hashes convert them to an array of objects in {type:x, hash:y} format
+				file_hashes = file.get("hashes", [])
+				if type(file_hashes) == dict:
+					for key, value in file_hashes.items():
+						temp_hashes.append({ "type": key, "hash": value })
+				else:
+					temp_hashes.extend(file_hashes)
+
+				hashes.extend(temp_hashes)
+				
 				if sanitized_version_name not in version_names:
 					version_names.add(sanitized_version_name)
 
-				download_url = f"https://civitai.com/api/download/models/{model_version['id']}?type={file_type}&format={file_format}"
 				file_name_em = file_name[:file_name.rindex(".")] + "_em" + file_name[file_name.rindex("."):]
 				
 				if file_name not in files:
@@ -1276,13 +1318,20 @@ def generate_version_files_array(data):
 				if file_name_em not in files and data["type"].lower() == "textualinversion":
 					files.add(file_name_em)
 
-				url_file_name = get_filename_for_url(download_url)
+				# the old system needed you to download the file to get the models's proper file name. The new system has the proper file name in file['name']. Use the existence of the new property 'downloadUrl' to check if its the old version or not
+				if 'downloadUrl' not in file:
+					
+					if id in version_files.keys() and sanitized_name == version_files[id]['name'] and sanitized_version_name in version_files[id]['versions']:
+						continue # odds that the filename has changed since the last time it was saved is low, skip this file
 
-				if url_file_name is not None and file_name != url_file_name and url_file_name not in files:
-					url_file_name_em = url_file_name[:url_file_name.rindex(".")] + "_em" + url_file_name[url_file_name.rindex("."):]
-					files.add(url_file_name)
-					if data["type"] == "TextualInversion" and url_file_name_em not in files:
-						files.add(url_file_name_em)
+					download_url = file.get('downloadUrl', f"https://civitai.com/api/download/models/{model_version['id']}?type={file_type}&format={file_format}")
+					url_file_name = get_filename_for_url(download_url)
+
+					if url_file_name is not None and file_name != url_file_name and url_file_name not in files:
+						url_file_name_em = url_file_name[:url_file_name.rindex(".")] + "_em" + url_file_name[url_file_name.rindex("."):]
+						files.add(url_file_name)
+						if data["type"] == "TextualInversion" and url_file_name_em not in files:
+							files.add(url_file_name_em)
 
 		if update_version_files:
 			hash_set = set()
@@ -1434,7 +1483,7 @@ def processJSONData(json_data, key_to_generate):
 def update_data(old_data, new_data):
 	# Iterate over the keys in the new data
 	for key in new_data:
-		# See if there was an error and skip if there was and error
+		# See if there was an error and skip if there was an error
 		new_state = new_data[key].get('pageData', {}).get('props', {}).get('pageProps', {}).get('trpcState', {}).get('json', {}).get('queries')[0].get('state', {})
 		if new_state.get('status', "").lower() == "error":
 			print(f"Error while building {key} - {new_state.get('error', {}).get('message', 'UNKNOWN ERROR')}")
@@ -1456,6 +1505,12 @@ def update_data(old_data, new_data):
 				for old_version in old_model_versions:
 					if new_version['id'] == old_version['id']:
 						version_found = True
+						# update rank if available
+						new_rank = new_version.get('rank', None)
+
+						if new_rank:
+							old_version['rank'] = new_rank
+
 						old_images = old_version.get('images', [])
 						new_images = new_version.get('images', [])
 						
@@ -1463,7 +1518,7 @@ def update_data(old_data, new_data):
 						for new_image in new_images:
 							image_found = False
 							for old_image in old_images:
-								if new_image['id'] == old_image['id']:
+								if is_same_image_id(new_image, old_image):
 									image_found = True
 									break
 							if not image_found:
@@ -1500,7 +1555,7 @@ def update_data(old_data, new_data):
 						# Check if the image already exists in the old review's list of images
 						image_exists = False
 						for old_image in old_review['images']:
-							if old_image['id'] == new_image['id']:
+							if is_same_image_id(new_image, old_image):
 								image_exists = True
 								break
 						# If the image doesn't exist, append it to the old review's list of images
@@ -1545,26 +1600,26 @@ def getNewDataFromSiteForModel(model_num):
 	if model_num and int(model_num) > 0:
 		model_num = str(model_num)
 		# Set the value of the url_model variable to the URL of the model page
-		url_model = f"https://civitai.com/models/{model_num}/"
+		url_model = f"https://civitai.com/api/v1/models/{model_num}/"
 		# build the comment params url string
 		comment_params = urllib.parse.quote(json.dumps(buildCommentParams(1, model_num, comment_limit, buildCommentParams(0, model_num, review_limit))))
 		# Set the value of the url_reviews variable to the URL of the review data
 		url_reviews = f"https://civitai.com/api/trpc/review.getAll,comment.getAll?batch=1&input={comment_params}"
 		# Send a GET request to the model page and parse the response
-		response = requests.get(url_model)
+		response = requests.get(url_model, timeout=(10, 20))
 
 		if response.status_code == 200:
-			doc = BeautifulSoup(response.text, "html.parser")
+			doc = response.json()
+			if "error" in doc:
+				print(doc['error'])
+				exit() # may want to change this to a soft fail
 		else:
 			print("Error: Invalid response from server")
 			print(response)
-			exit()
+			exit() # may want to change this to a soft fail
 
-		# Extract the page data from the response
-		page_data = doc.find(id="__NEXT_DATA__").text
-
-		# Parse the page data text as JSON
-		page_data = json.loads(page_data)
+		# Insert page data back into old structure for backwards compatibility
+		page_data = { 'props': { 'pageProps': { 'trpcState': { 'json': { 'queries': [ { 'state': { 'data': doc } } ] } } } } }
 
 		headers = {
 			"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/110.0",
@@ -1582,8 +1637,11 @@ def getNewDataFromSiteForModel(model_num):
 			"TE": "trailers",
 		}
 
+		if cookie:
+			headers['Cookie'] = cookie
+
 		# Send a GET request to the review page and parse the response
-		response = requests.get(url_reviews, headers=headers)
+		response = requests.get(url_reviews, headers=headers, timeout=(10, 20))
 		review_data = response.json()
 
 		review_count = 0
@@ -1605,7 +1663,7 @@ def getNewDataFromSiteForModel(model_num):
 			comment_params = urllib.parse.quote(json.dumps(buildCommentParams(0, model_num, review_limit, cursor=nextCursor)))
 			# Set the value of the url_reviews variable to the URL of the review data
 			url_reviews = f"https://civitai.com/api/trpc/review.getAll?batch=1&input={comment_params}"
-			response = requests.get(url_reviews, headers=headers)
+			response = requests.get(url_reviews, headers=headers, timeout=(10, 20))
 			new_review_data = response.json()
 			new_reviews = new_review_data[0].get('result', {}).get('data', {}).get('json', {}).get('reviews', [])
 			nextCursor = new_review_data[0].get('result', {}).get('data', {}).get('json', {}).get('nextCursor', None)
